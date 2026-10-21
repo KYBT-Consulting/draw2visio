@@ -51,7 +51,7 @@ mxVsdxCanvas2D.prototype.onFilesLoaded = function ()
 /**
  * Function: createElt
  *  
- * Create a new geo section.
+ * Create a new XML element in the Visio namespace.
  */
 mxVsdxCanvas2D.prototype.createElt = function (name)
 {
@@ -63,15 +63,12 @@ mxVsdxCanvas2D.prototype.createElt = function (name)
 /**
  * Function: createGeoSec
  *  
- * Create a new geo section.
+ * Create a new Geometry section and track it in pendingGeoSecs so that
+ * subsequent stroke()/fill()/fillAndStroke() calls apply NoFill/NoLine
+ * to all subpaths in the current drawing operation.
  */
 mxVsdxCanvas2D.prototype.createGeoSec = function ()
 {
-	if (this.geoSec != null)
-	{
-		this.shape.appendChild(this.geoSec);
-	}
-	
 	var geoSec = this.createElt("Section");
 	
 	geoSec.setAttribute("N", "Geometry");
@@ -83,6 +80,11 @@ mxVsdxCanvas2D.prototype.createGeoSec = function ()
 	this.lastY = 0;
 	this.lastMoveToX = 0;
 	this.lastMoveToY = 0;
+
+	if (this.pendingGeoSecs != null)
+	{
+		this.pendingGeoSecs.push(geoSec);
+	}
 };
 
 
@@ -91,14 +93,15 @@ mxVsdxCanvas2D.prototype.createGeoSec = function ()
  *  
  * Create a new shape.
  */
-mxVsdxCanvas2D.prototype.newShape = function (shape, cellState, xmlDoc)
+mxVsdxCanvas2D.prototype.newShape = function (shape, cellState, xmlDoc, shapeGeo)
 {
 	this.geoIndex = 0;
 	this.shape = shape;
 	this.cellState = cellState;
-	this.xmGeo = cellState.cell.geometry;
+	this.xmGeo = shapeGeo || cellState.cell.geometry;
 	this.xmlDoc = xmlDoc;
 	this.geoSec = null;
+	this.pendingGeoSecs = [];
 	this.shapeImg = null;
 	this.shapeType = "Shape";
 	
@@ -111,22 +114,34 @@ mxVsdxCanvas2D.prototype.newShape = function (shape, cellState, xmlDoc)
  *  
  * Create a new edge.
  */
-mxVsdxCanvas2D.prototype.newEdge = function (shape, cellState, xmlDoc)
+mxVsdxCanvas2D.prototype.newEdge = function (shape, cellState, xmlDoc, edgeGeo)
 {
 	this.shape = shape;
 	this.cellState = cellState;
-	this.xmGeo = cellState.cellBounds;
-	var s = this.state;
+	this.xmGeo = edgeGeo || cellState.cellBounds;
 	this.xmlDoc = xmlDoc;
 };
 
 /**
  * Function: endShape
  *  
- * End current shape.
+ * End current shape and flush any remaining non-empty geometry sections.
  */
 mxVsdxCanvas2D.prototype.endShape = function ()
 {
+	if (this.pendingGeoSecs != null)
+	{
+		for (var i = 0; i < this.pendingGeoSecs.length; i++)
+		{
+			var sec = this.pendingGeoSecs[i];
+			if (sec.childNodes.length > 0 && sec.parentNode == null)
+			{
+				this.shape.appendChild(sec);
+			}
+		}
+		this.pendingGeoSecs = [];
+	}
+
 	if (this.shapeImg != null)
 	{
 		this.addForeignData(this.shapeImg.type, this.shapeImg.id);
@@ -142,13 +157,14 @@ mxVsdxCanvas2D.prototype.endShape = function ()
 mxVsdxCanvas2D.prototype.newPage = function ()
 {
 	this.images = [];
+	this.imageMap = {};
 	this.pageIndex++;
 };
 
 /**
- * Function: newPage
+ * Function: getShapeType
  *  
- * Start a new page.
+ * Return the Visio shape type ("Shape" or "Foreign").
  */
 mxVsdxCanvas2D.prototype.getShapeType = function ()
 {
@@ -158,7 +174,7 @@ mxVsdxCanvas2D.prototype.getShapeType = function ()
 /**
  * Function: getShapeGeo
  *  
- * return the current geo section.
+ * Return the current geo section.
  */
 mxVsdxCanvas2D.prototype.getShapeGeo = function ()
 {
@@ -168,7 +184,7 @@ mxVsdxCanvas2D.prototype.getShapeGeo = function ()
 /**
  * Function: createCellElemScaled
  * 
- * Creates a cell element and scale the value.
+ * Creates a cell element and scales the value to inches.
  */
 mxVsdxCanvas2D.prototype.createCellElemScaled = function (name, val, formula)
 {
@@ -191,7 +207,7 @@ mxVsdxCanvas2D.prototype.createCellElem = function (name, val, formula)
 	return cell;
 };
 
-mxVsdxCanvas2D.prototype.createRowScaled = function(type, index, x, y, a, b, c , d, xF, yF, aF, bF, cF, dF) 
+mxVsdxCanvas2D.prototype.createRowScaled = function(type, index, x, y, a, b, c, d, xF, yF, aF, bF, cF, dF) 
 {
 	return this.createRowRel(type, index, x / VsdxExport.prototype.CONVERSION_FACTOR, y / VsdxExport.prototype.CONVERSION_FACTOR,
 			a / VsdxExport.prototype.CONVERSION_FACTOR, b / VsdxExport.prototype.CONVERSION_FACTOR,
@@ -199,7 +215,7 @@ mxVsdxCanvas2D.prototype.createRowScaled = function(type, index, x, y, a, b, c ,
 			xF, yF, aF, bF, cF, dF);
 };
 
-mxVsdxCanvas2D.prototype.createRowRel = function(type, index, x, y, a, b, c , d, xF, yF, aF, bF, cF, dF) 
+mxVsdxCanvas2D.prototype.createRowRel = function(type, index, x, y, a, b, c, d, xF, yF, aF, bF, cF, dF) 
 {
 	var row = this.createElt("Row");
 	row.setAttribute("T", type);
@@ -223,61 +239,66 @@ mxVsdxCanvas2D.prototype.createRowRel = function(type, index, x, y, a, b, c , d,
  */
 mxVsdxCanvas2D.prototype.begin = function()
 {
-	if (this.geoStepIndex > 1)	this.createGeoSec();
+	if (this.geoStepIndex > 1) this.createGeoSec();
 };
 
 /**
  * Function: rect
  * 
- * Private helper function to create SVG elements
+ * Creates a proportional rectangle path in the current Geometry section.
  */
 mxVsdxCanvas2D.prototype.rect = function(x, y, w, h)
 {
-	if (this.geoStepIndex > 1)	this.createGeoSec();
+	if (this.geoStepIndex > 1) this.createGeoSec();
 	
 	var s = this.state;
 	w = w * s.scale;
 	h = h * s.scale;
 
 	var geo = this.xmGeo;
+	var gw = (geo.width || 1) * s.scale;
+	var gh = (geo.height || 1) * s.scale;
 	x = ((x - geo.x + s.dx) * s.scale);
 	y = ((geo.height - y + geo.y - s.dy) * s.scale);
 	
-	this.geoSec.appendChild(this.createRowScaled("MoveTo", this.geoStepIndex++, x, y));
-	this.geoSec.appendChild(this.createRowScaled("LineTo", this.geoStepIndex++, x + w, y));
-	this.geoSec.appendChild(this.createRowScaled("LineTo", this.geoStepIndex++, x + w, y - h));
-	this.geoSec.appendChild(this.createRowScaled("LineTo", this.geoStepIndex++, x, y - h));
-	this.geoSec.appendChild(this.createRowScaled("LineTo", this.geoStepIndex++, x, y));
+	this.geoSec.appendChild(this.createRowRel("RelMoveTo", this.geoStepIndex++, x / gw, y / gh));
+	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, (x + w) / gw, y / gh));
+	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, (x + w) / gw, (y - h) / gh));
+	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, x / gw, (y - h) / gh));
+	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, x / gw, y / gh));
 };
 
 /**
  * Function: roundrect
  * 
- * Private helper function to create SVG elements
+ * Creates a rounded rectangle path and sets Rounding on the shape.
  */
 mxVsdxCanvas2D.prototype.roundrect = function(x, y, w, h, dx, dy)
 {
 	this.rect(x, y, w, h);
-	//TODO this assume dx and dy are equal and only one rounding is needed
-	this.shape.appendChild(this.createCellElemScaled("Rounding", dx));
+	var r = Math.min(dx || 0, dy != null ? dy : (dx || 0)) * this.state.scale;
+	if (r > 0)
+	{
+		this.shape.appendChild(this.createCellElemScaled("Rounding", r));
+	}
 };
 
 /**
  * Function: ellipse
  * 
- * Private helper function to create SVG elements
+ * Creates a proportional Ellipse row in the current Geometry section.
  */
 mxVsdxCanvas2D.prototype.ellipse = function(x, y, w, h)
 {
-	if (this.geoStepIndex > 1)	this.createGeoSec();
+	if (this.geoStepIndex > 1) this.createGeoSec();
 	
 	var s = this.state;
 	w = w * s.scale;
 	h = h * s.scale;
 	
 	var geo = this.xmGeo;
-	var gh = geo.height * s.scale;
-	var gw = geo.width * s.scale;
+	var gh = (geo.height || 1) * s.scale;
+	var gw = (geo.width || 1) * s.scale;
 	x = (x - geo.x + s.dx) * s.scale;
 	y = gh + (-y + geo.y - s.dy) * s.scale;
 
@@ -288,24 +309,18 @@ mxVsdxCanvas2D.prototype.ellipse = function(x, y, w, h)
 	var cWr = (x + w/2) / gw;
 	var dHr = y / gh;
 	
-	this.geoSec.appendChild(this.createRowScaled("Ellipse", this.geoStepIndex++, x + w/2, y - h/2, x, y - h/2, x + w/2, y
-			, "Width*" + xWr, "Height*" + yHr, "Width*" + aWr, "Height*" + bHr, "Width*" + cWr, "Height*" + dHr));
+	this.geoSec.appendChild(this.createRowScaled("Ellipse", this.geoStepIndex++, x + w/2, y - h/2, x, y - h/2, x + w/2, y,
+		"Width*" + xWr, "Height*" + yHr, "Width*" + aWr, "Height*" + bHr, "Width*" + cWr, "Height*" + dHr));
 };
 
 /**
  * Function: moveTo
  * 
- * Moves the current path the given point.
- * 
- * Parameters:
- * 
- * x - Number that represents the x-coordinate of the point.
- * y - Number that represents the y-coordinate of the point.
+ * Moves the current path to the given point.
  */
 mxVsdxCanvas2D.prototype.moveTo = function(x, y)
 {
-	//MoveTo inside a geo usually produce incorrect fill
-	if (this.geoStepIndex > 1)	this.createGeoSec();
+	if (this.geoStepIndex > 1) this.createGeoSec();
 	
 	this.lastMoveToX = x;
 	this.lastMoveToY = y;
@@ -316,21 +331,16 @@ mxVsdxCanvas2D.prototype.moveTo = function(x, y)
 	var s = this.state;
 	x = (x - geo.x + s.dx) * s.scale;
 	y = (geo.height - y + geo.y - s.dy) * s.scale;
-	var h = geo.height * s.scale;
-	var w = geo.width * s.scale;
+	var h = (geo.height || 1) * s.scale;
+	var w = (geo.width || 1) * s.scale;
 
-	this.geoSec.appendChild(this.createRowRel("RelMoveTo", this.geoStepIndex++, x/w, y/h));
+	this.geoSec.appendChild(this.createRowRel("RelMoveTo", this.geoStepIndex++, x / w, y / h));
 };
 
 /**
  * Function: lineTo
  * 
  * Draws a line to the given coordinates.
- * 
- * Parameters:
- * 
- * x - Number that represents the x-coordinate of the endpoint.
- * y - Number that represents the y-coordinate of the endpoint.
  */
 mxVsdxCanvas2D.prototype.lineTo = function(x, y)
 {
@@ -341,23 +351,16 @@ mxVsdxCanvas2D.prototype.lineTo = function(x, y)
 	var s = this.state;
 	x = (x - geo.x + s.dx) * s.scale;
 	y = (geo.height - y + geo.y - s.dy) * s.scale;
-	var h = geo.height * s.scale;
-	var w = geo.width * s.scale;
+	var h = (geo.height || 1) * s.scale;
+	var w = (geo.width || 1) * s.scale;
 
-	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, x/w, y/h));
+	this.geoSec.appendChild(this.createRowRel("RelLineTo", this.geoStepIndex++, x / w, y / h));
 };
 
 /**
  * Function: quadTo
  * 
  * Adds a quadratic curve to the current path.
- * 
- * Parameters:
- * 
- * x1 - Number that represents the x-coordinate of the control point.
- * y1 - Number that represents the y-coordinate of the control point.
- * x2 - Number that represents the x-coordinate of the endpoint.
- * y2 - Number that represents the y-coordinate of the endpoint.
  */
 mxVsdxCanvas2D.prototype.quadTo = function(x1, y1, x2, y2)
 {
@@ -367,8 +370,8 @@ mxVsdxCanvas2D.prototype.quadTo = function(x1, y1, x2, y2)
 	var s = this.state;
 	var geo = this.xmGeo;
 
-	var h = geo.height * s.scale;
-	var w = geo.width * s.scale;
+	var h = (geo.height || 1) * s.scale;
+	var w = (geo.width || 1) * s.scale;
 
 	x1 = (x1 - geo.x + s.dx) * s.scale;
 	y1 = (geo.height - y1 + geo.y - s.dy) * s.scale;
@@ -388,15 +391,6 @@ mxVsdxCanvas2D.prototype.quadTo = function(x1, y1, x2, y2)
  * Function: curveTo
  * 
  * Adds a bezier curve to the current path.
- * 
- * Parameters:
- * 
- * x1 - Number that represents the x-coordinate of the first control point.
- * y1 - Number that represents the y-coordinate of the first control point.
- * x2 - Number that represents the x-coordinate of the second control point.
- * y2 - Number that represents the y-coordinate of the second control point.
- * x3 - Number that represents the x-coordinate of the endpoint.
- * y3 - Number that represents the y-coordinate of the endpoint.
  */
 mxVsdxCanvas2D.prototype.curveTo = function(x1, y1, x2, y2, x3, y3)
 {
@@ -406,8 +400,8 @@ mxVsdxCanvas2D.prototype.curveTo = function(x1, y1, x2, y2, x3, y3)
 	var s = this.state;
 	var geo = this.xmGeo;
 
-	var h = geo.height * s.scale;
-	var w = geo.width * s.scale;
+	var h = (geo.height || 1) * s.scale;
+	var w = (geo.width || 1) * s.scale;
 
 	x1 = (x1 - geo.x + s.dx) * s.scale;
 	y1 = (geo.height - y1 + geo.y - s.dy) * s.scale;
@@ -435,7 +429,7 @@ mxVsdxCanvas2D.prototype.curveTo = function(x1, y1, x2, y2, x3, y3)
  */
 mxVsdxCanvas2D.prototype.close = function()
 {
-	//Closing with a line if last point != last MoveTo point
+	// Closing with a line if last point != last MoveTo point
 	if (this.lastMoveToX != this.lastX || this.lastMoveToY != this.lastY)
 		this.lineTo(this.lastMoveToX, this.lastMoveToY);
 };
@@ -443,21 +437,21 @@ mxVsdxCanvas2D.prototype.close = function()
 /**
  * Function: addForeignData
  * 
- * Add ForeignData to current shape using last image in the images array
+ * Add ForeignData to current shape using image relationship index.
  */
 mxVsdxCanvas2D.prototype.addForeignData = function(type, index) 
 {
 	var foreignData = this.createElt("ForeignData");
 	foreignData.setAttribute("ForeignType", "Bitmap");
 	
-	type = type.toUpperCase();
+	type = String(type || "png").toUpperCase();
+	if (type === "JPG") type = "JPEG";
 	
 	if (type != "BMP")
 		foreignData.setAttribute("CompressionType", type);
 	
 	var rel = this.createElt("Rel");
 	rel.setAttribute("r:id", "rId" + index);
-	
 	
 	foreignData.appendChild(rel);
 	this.shape.appendChild(foreignData);
@@ -476,17 +470,19 @@ mxVsdxCanvas2D.prototype.convertSvg2Png = function(svgData, w, h, isBase64, call
 		
 		if (!isBase64)
 		{
-			svgData = String.fromCharCode.apply(null, new Uint8Array(svgData));
-			
-			svgData =  ((window.btoa)? btoa(svgData) : Base64.encode(svgData, true));
+			if (typeof svgData !== "string")
+			{
+				svgData = String.fromCharCode.apply(null, new Uint8Array(svgData));
+			}
+			svgData = ((window.btoa) ? btoa(svgData) : Base64.encode(svgData, true));
 		}
 		
 		var svgUrl = "data:image/svg+xml;base64," + svgData;  
 			
-	    img = new Image;
+	    var img = new Image();
 	
 		img.onload = function () {
-			canvas.width = Math.max(this.width ,w);
+			canvas.width = Math.max(this.width, w);
 			canvas.height = Math.max(this.height, h);
 			
 		    ctx.drawImage(this, 0, 0, canvas.width, canvas.height);     
@@ -495,7 +491,7 @@ mxVsdxCanvas2D.prototype.convertSvg2Png = function(svgData, w, h, isBase64, call
 		    {
 		    	callback(canvas.toDataURL("image/png"));
 		    }
-		    catch(e){}//ignore
+		    catch(e){}
 
 		    that.filesLoading--;
 	    	
@@ -510,9 +506,9 @@ mxVsdxCanvas2D.prototype.convertSvg2Png = function(svgData, w, h, isBase64, call
 
 			try
 		    {
-		    	callback(svgData); //Error, just return the original data!
+		    	callback(svgData);
 		    }
-		    catch(e){}//ignore
+		    catch(e){}
 
 		    that.filesLoading--;
 		    
@@ -530,9 +526,9 @@ mxVsdxCanvas2D.prototype.convertSvg2Png = function(svgData, w, h, isBase64, call
 		
 		try
 		{
-			callback(svgData); //just to keep going!
+			callback(svgData);
 	    }
-	    catch(e){}//ignore
+	    catch(err){}
 
 		this.filesLoading--;
 
@@ -547,7 +543,7 @@ mxVsdxCanvas2D.prototype.convertSvg2Png = function(svgData, w, h, isBase64, call
 /**
  * Function: image
  * 
- * Add image to vsdx file as a media (Foreign Object)
+ * Add image to vsdx file as a media (Foreign Object), reusing duplicate images on the same page.
  */
 mxVsdxCanvas2D.prototype.image = function(x, y, w, h, src, aspect, flipH, flipV)
 {
@@ -556,91 +552,135 @@ mxVsdxCanvas2D.prototype.image = function(x, y, w, h, src, aspect, flipH, flipV)
 	w = w * s.scale;
 	h = h * s.scale;
 	
-	//TODO image reusing, if the same image is used more than once, reuse it. Applicable for URLs specifically (but can also be applied to embedded ones)
-	var imgName = this.pageIndex + "_image" + (this.images.length + 1) + "."; 
-	var type;
-	if (src.indexOf("data:") == 0)
+	if (this.imageMap == null)
 	{
-		var p = src.indexOf("base64,");
-		var base64 = src.substring(p + 7); //7 is the length of "base64,"
-		type = src.substring(11, p-1); //11 is the length of "data:image/"
-		
-		//SVG files cannot be embedded in vsdx files, TODO convert them to a visio shape
-		if (type.indexOf('svg') == 0) {
-			type = 'png';
-			imgName += type;
-			this.convertSvg2Png(base64, w, h, true, function(pngData){
-				that.zip.file("visio/media/" + imgName, pngData.substring(22), {base64: true}); //22 is the length of "data:image/png;base64,"
-			});
-		}
-		else
-		{
-			imgName += type;
-			this.zip.file("visio/media/" + imgName, base64, {base64: true});
-		}
+		this.imageMap = {};
 	}
-	else if (window.XMLHttpRequest) //URL src, fetch it
+
+	var cachedImg = this.imageMap[src];
+	if (cachedImg != null)
 	{
-		src = this.converter.convert(src);
-		this.filesLoading++;
-		
-		var p = src.lastIndexOf(".");
-		type = src.substring(p+1);
-		
-		var convertSvg = false;
-		
-		if (type.indexOf('svg') == 0) 
+		this.shapeImg = { type: cachedImg.type, id: cachedImg.id };
+	}
+	else
+	{
+		var imgIndex = this.images.length + 1;
+		var imgName = this.pageIndex + "_image" + imgIndex + "."; 
+		var type = "png";
+
+		if (src.indexOf("data:") == 0)
 		{
-			type = 'png';
-			convertSvg = true;
+			var p = src.indexOf("base64,");
+			if (p > 0)
+			{
+				var base64 = src.substring(p + 7);
+				type = src.substring(11, p - 1); // after "data:image/"
+				if (type.indexOf("svg") == 0)
+				{
+					type = "png";
+					imgName += type;
+					if (typeof document !== "undefined" && document.createElement && typeof Image !== "undefined")
+					{
+						this.convertSvg2Png(base64, w, h, true, function(pngData) {
+							var dIdx = pngData.indexOf("base64,");
+							that.zip.file("visio/media/" + imgName, dIdx >= 0 ? pngData.substring(dIdx + 7) : pngData, {base64: true});
+						});
+					}
+					else
+					{
+						this.zip.file("visio/media/" + imgName, base64, {base64: true});
+					}
+				}
+				else
+				{
+					if (type.indexOf(";") > 0) type = type.substring(0, type.indexOf(";"));
+					imgName += type;
+					this.zip.file("visio/media/" + imgName, base64, {base64: true});
+				}
+			}
+			else
+			{
+				var commaIdx = src.indexOf(",");
+				var rawData = commaIdx >= 0 ? decodeURIComponent(src.substring(commaIdx + 1)) : "";
+				type = "png";
+				imgName += type;
+				if (typeof document !== "undefined" && document.createElement && typeof Image !== "undefined")
+				{
+					this.convertSvg2Png(rawData, w, h, false, function(pngData) {
+						var dIdx = pngData.indexOf("base64,");
+						that.zip.file("visio/media/" + imgName, dIdx >= 0 ? pngData.substring(dIdx + 7) : pngData, {base64: true});
+					});
+				}
+				else
+				{
+					this.zip.file("visio/media/" + imgName, rawData);
+				}
+			}
 		}
-
-		imgName += type;
-
-		//The old browsers binary workaround doesn't work with jszip and converting to base64 encoding doesn't work also
-		var xhr = new XMLHttpRequest();
-		xhr.open('GET', src, true);
-		xhr.responseType = 'arraybuffer';
-		xhr.onreadystatechange = function(e) 
+		else if (typeof window !== "undefined" && window.XMLHttpRequest)
 		{
-		    if (this.readyState == 4) 
-		    {
-		    	if (this.status == 200)
-	    		{
-		    		//SVG files cannot be embedded in vsdx files, TODO convert them to a visio shape
-		    		if (convertSvg)
-	    			{
-		    			that.convertSvg2Png(this.response, w, h, false, function(pngData){
-		    				that.zip.file("visio/media/" + imgName, pngData.substring(22), {base64: true}); //22 is the length of "data:image/png;base64,"
-		    			});
-		    		}
-		    		else
+			var convertedSrc = (this.converter != null) ? this.converter.convert(src) : src;
+			this.filesLoading++;
+			
+			var cleanUrl = convertedSrc.split("?")[0].split("#")[0];
+			var p = cleanUrl.lastIndexOf(".");
+			type = (p >= 0) ? cleanUrl.substring(p + 1).toLowerCase() : "png";
+			
+			var convertSvg = false;
+			if (type.indexOf("svg") == 0) 
+			{
+				type = "png";
+				convertSvg = true;
+			}
+
+			imgName += type;
+
+			var xhr = new XMLHttpRequest();
+			xhr.open('GET', convertedSrc, true);
+			xhr.responseType = 'arraybuffer';
+			xhr.onreadystatechange = function(e) 
+			{
+			    if (this.readyState == 4) 
+			    {
+			    	if (this.status == 200)
 		    		{
-		    			that.zip.file("visio/media/" + imgName, this.response);
+			    		if (convertSvg)
+		    			{
+			    			that.convertSvg2Png(this.response, w, h, false, function(pngData) {
+			    				var dIdx = pngData.indexOf("base64,");
+			    				that.zip.file("visio/media/" + imgName, dIdx >= 0 ? pngData.substring(dIdx + 7) : pngData, {base64: true});
+			    			});
+			    		}
+			    		else
+			    		{
+			    			that.zip.file("visio/media/" + imgName, this.response);
+			    		}
 		    		}
-	    		}
-		    	
-		    	that.filesLoading--;
-		    	
-		    	if (that.filesLoading == 0)
-		    	{
-		    		that.onFilesLoaded();
-		    	}
-		    }
-		};
-		xhr.send();
+			    	
+			    	that.filesLoading--;
+			    	
+			    	if (that.filesLoading == 0)
+			    	{
+			    		that.onFilesLoaded();
+			    	}
+			    }
+			};
+			xhr.send();
+		}
+
+		this.images.push(imgName);
+		// Add 1 to the id as rId1 is reserved for the edges master
+		var rIdNum = this.images.length + 1;
+		this.shapeImg = { type: type, id: rIdNum };
+		this.imageMap[src] = { name: imgName, type: type, id: rIdNum };
 	}
 
-	this.images.push(imgName);
-	
-	//TODO can a shape has more than one image?
-	//We add one to the id as rId1 is reserved for the edges master
-	this.shapeImg = {type: type, id: this.images.length + 1};
-
-	//TODO support these!
 	aspect = (aspect != null) ? aspect : true;
 	flipH = (flipH != null) ? flipH : false;
 	flipV = (flipV != null) ? flipV : false;
+
+	if (flipH) this.shape.appendChild(this.createCellElem("FlipX", 1));
+	if (flipV) this.shape.appendChild(this.createCellElem("FlipY", 1));
 
 	var geo = this.xmGeo;
 	x = (x - geo.x + s.dx) * s.scale;
@@ -650,75 +690,332 @@ mxVsdxCanvas2D.prototype.image = function(x, y, w, h, src, aspect, flipH, flipV)
 	this.shape.appendChild(this.createCellElemScaled("ImgOffsetY", y - h));
 	this.shape.appendChild(this.createCellElemScaled("ImgWidth", w));
 	this.shape.appendChild(this.createCellElemScaled("ImgHeight", h));
-	
-//	var s = this.state;
-//	x += s.dx;
-//	y += s.dy;
-//	
-//	if (s.alpha < 1 || s.fillAlpha < 1)
-//	{
-//		node.setAttribute('opacity', s.alpha * s.fillAlpha);
-//	}
-//	
-//	var tr = this.state.transform || '';
-//	
-//	if (flipH || flipV)
-//	{
-//		var sx = 1;
-//		var sy = 1;
-//		var dx = 0;
-//		var dy = 0;
-//		
-//		if (flipH)
-//		{
-//			sx = -1;
-//			dx = -w - 2 * x;
-//		}
-//		
-//		if (flipV)
-//		{
-//			sy = -1;
-//			dy = -h - 2 * y;
-//		}
-//		
-//		// Adds image tansformation to existing transform
-//		tr += 'scale(' + sx + ',' + sy + ')translate(' + (dx * s.scale) + ',' + (dy * s.scale) + ')';
-//	}
-//
-//	if (tr.length > 0)
-//	{
-//		node.setAttribute('transform', tr);
-//	}
-//	
-//	if (!this.pointerEvents)
-//	{
-//		node.setAttribute('pointer-events', 'none');
-//	}
+};
+
+/**
+ * Helper to normalize CSS/HTML colors to #rrggbb for Visio Character cells.
+ */
+mxVsdxCanvas2D.prototype.normalizeColor = function(color, defaultColor)
+{
+	if (!color || color === "none" || color === "inherit" || color === "initial" || color === "transparent")
+	{
+		return defaultColor || null;
+	}
+	if (color === "default")
+	{
+		return defaultColor || "#000000";
+	}
+	if (typeof mxUtils !== "undefined" && mxUtils.isLightDarkColor && mxUtils.isLightDarkColor(color))
+	{
+		color = mxUtils.parseLightDarkColor(color).light;
+	}
+	var hex = (typeof mxUtils !== "undefined" && mxUtils.rgba2hex) ? mxUtils.rgba2hex(color) : color;
+	if (!hex || hex === "none" || hex === "default")
+	{
+		return defaultColor || null;
+	}
+	hex = String(hex).trim();
+	if (/^#[0-9a-fA-F]{3}$/.test(hex))
+	{
+		hex = "#" + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+	}
+	if (/^#[0-9a-fA-F]{6}$/.test(hex))
+	{
+		return hex.toLowerCase();
+	}
+	return defaultColor || null;
+};
+
+/**
+ * Helper to parse inline style string into a key-value map.
+ */
+mxVsdxCanvas2D.prototype.parseInlineStyle = function(styleAttr)
+{
+	var map = {};
+	if (!styleAttr) return map;
+	var parts = String(styleAttr).split(";");
+	for (var i = 0; i < parts.length; i++)
+	{
+		var kv = parts[i].split(":");
+		if (kv.length >= 2)
+		{
+			var k = kv[0].trim().toLowerCase();
+			var v = kv.slice(1).join(":").trim();
+			if (k && v) map[k] = v;
+		}
+	}
+	return map;
+};
+
+/**
+ * Helper to parse HTML or plain text into an array of paragraphs,
+ * where each paragraph is { align, bullet, runs: [ { text, fontColor, fontSize, fontFamily, bold, italic, underline, strikethrough, pos } ] }.
+ */
+mxVsdxCanvas2D.prototype.parseTextParagraphs = function(str, format, baseStyle)
+{
+	var that = this;
+	var paragraphs = [];
+	var currentPara = {
+		align: baseStyle.align,
+		bullet: 0,
+		runs: []
+	};
+
+	var flushParagraph = function(nextAlign, nextBullet)
+	{
+		paragraphs.push(currentPara);
+		currentPara = {
+			align: nextAlign != null ? nextAlign : baseStyle.align,
+			bullet: nextBullet != null ? nextBullet : 0,
+			runs: []
+		};
+	};
+
+	var addRun = function(txt, style)
+	{
+		if (txt == null || txt === "") return;
+		var parts = String(txt).split("\n");
+		for (var i = 0; i < parts.length; i++)
+		{
+			if (i > 0)
+			{
+				flushParagraph(style.align, style.bullet);
+			}
+			if (parts[i].length > 0)
+			{
+				currentPara.runs.push({
+					text: parts[i],
+					fontColor: style.fontColor,
+					fontSize: style.fontSize,
+					fontFamily: style.fontFamily,
+					bold: !!style.bold,
+					italic: !!style.italic,
+					underline: !!style.underline,
+					strikethrough: !!style.strikethrough,
+					pos: style.pos || 0
+				});
+			}
+		}
+	};
+
+	if (format !== "html")
+	{
+		addRun(String(str), baseStyle);
+		paragraphs.push(currentPara);
+		return paragraphs;
+	}
+
+	var htmlStr = String(str);
+	if (mxUtils.getValue(this.cellState.style, 'nl2Br', '1') != '0')
+	{
+		htmlStr = htmlStr.replace(/\r\n/g, '\n').replace(/\n/g, '<br/>');
+	}
+	if (typeof Graph !== "undefined" && Graph.sanitizeHtml)
+	{
+		htmlStr = Graph.sanitizeHtml(htmlStr);
+	}
+
+	var container = null;
+	if (typeof document !== "undefined" && document.createElement)
+	{
+		if (this.html2txtDiv == null)
+		{
+			this.html2txtDiv = document.createElement("div");
+		}
+		this.html2txtDiv.innerHTML = htmlStr;
+		container = this.html2txtDiv;
+	}
+	else
+	{
+		// Fallback XML/HTML parser for headless environments without document.createElement("div")
+		try
+		{
+			var wrapped = "<div>" + htmlStr.replace(/<br\s*>/gi, "<br/>").replace(/<hr\s*>/gi, "<hr/>") + "</div>";
+			container = mxUtils.parseXml(wrapped).documentElement;
+		}
+		catch (e)
+		{
+			var stripped = htmlStr.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(div|p|li|h[1-6]|tr)>/gi, "\n").replace(/<[^>]+>/g, "");
+			addRun(stripped, baseStyle);
+			paragraphs.push(currentPara);
+			return paragraphs;
+		}
+	}
+
+	var htmlFontSizeMap = { "1": 8, "2": 10, "3": 12, "4": 14, "5": 18, "6": 24, "7": 36 };
+	var blockTags = { "DIV": 1, "P": 1, "H1": 1, "H2": 1, "H3": 1, "H4": 1, "H5": 1, "H6": 1, "LI": 1, "UL": 1, "OL": 1, "BLOCKQUOTE": 1, "TR": 1, "TABLE": 1 };
+
+	var walkNodes = function(nodes, pStyle)
+	{
+		var olCounter = 1;
+		for (var i = 0; i < nodes.length; i++)
+		{
+			var node = nodes[i];
+			if (node.nodeType === 3) // Text node
+			{
+				var txt = node.nodeValue || node.textContent || "";
+				if (txt.length > 0)
+				{
+					addRun(txt, pStyle);
+				}
+			}
+			else if (node.nodeType === 1) // Element node
+			{
+				var tag = (node.nodeName || node.tagName || "").toUpperCase();
+				if (tag === "BR")
+				{
+					flushParagraph(pStyle.align, pStyle.bullet);
+					continue;
+				}
+
+				var inlineMap = that.parseInlineStyle(node.getAttribute ? node.getAttribute("style") : "");
+				var cStyle = {
+					fontColor: pStyle.fontColor,
+					fontSize: pStyle.fontSize,
+					fontFamily: pStyle.fontFamily,
+					align: pStyle.align,
+					bold: pStyle.bold,
+					italic: pStyle.italic,
+					underline: pStyle.underline,
+					strikethrough: pStyle.strikethrough,
+					pos: pStyle.pos,
+					bullet: pStyle.bullet,
+					inOL: pStyle.inOL
+				};
+
+				// Tag-based styling
+				if (tag === "B" || tag === "STRONG" || /^H[1-6]$/.test(tag)) cStyle.bold = true;
+				if (tag === "I" || tag === "EM") cStyle.italic = true;
+				if (tag === "U" || tag === "INS") cStyle.underline = true;
+				if (tag === "S" || tag === "STRIKE" || tag === "DEL") cStyle.strikethrough = true;
+				if (tag === "SUP") cStyle.pos = 1;
+				if (tag === "SUB") cStyle.pos = 2;
+
+				if (tag === "FONT" && node.getAttribute)
+				{
+					var fc = node.getAttribute("color");
+					if (fc) cStyle.fontColor = that.normalizeColor(fc, cStyle.fontColor);
+					var ff = node.getAttribute("face");
+					if (ff) cStyle.fontFamily = ff.replace(/['"]/g, "");
+					var fs = node.getAttribute("size");
+					if (fs && htmlFontSizeMap[fs]) cStyle.fontSize = htmlFontSizeMap[fs];
+				}
+
+				// Inline CSS overrides
+				if (inlineMap["font-weight"])
+				{
+					var fw = inlineMap["font-weight"].toLowerCase();
+					cStyle.bold = (fw === "bold" || fw === "bolder" || parseInt(fw, 10) >= 600);
+				}
+				if (inlineMap["font-style"])
+				{
+					var fst = inlineMap["font-style"].toLowerCase();
+					cStyle.italic = (fst === "italic" || fst === "oblique");
+				}
+				var tdec = (inlineMap["text-decoration"] || inlineMap["text-decoration-line"] || "").toLowerCase();
+				if (tdec)
+				{
+					if (tdec.indexOf("underline") >= 0) cStyle.underline = true;
+					if (tdec.indexOf("line-through") >= 0) cStyle.strikethrough = true;
+					if (tdec === "none")
+					{
+						cStyle.underline = false;
+						cStyle.strikethrough = false;
+					}
+				}
+				if (inlineMap["color"])
+				{
+					cStyle.fontColor = that.normalizeColor(inlineMap["color"], cStyle.fontColor);
+				}
+				if (inlineMap["font-family"])
+				{
+					cStyle.fontFamily = inlineMap["font-family"].replace(/['"]/g, "").split(",")[0].trim();
+				}
+				if (inlineMap["font-size"])
+				{
+					var rawFs = inlineMap["font-size"].toLowerCase();
+					var numFs = parseFloat(rawFs);
+					if (!isNaN(numFs) && numFs > 0)
+					{
+						if (rawFs.indexOf("em") > 0) cStyle.fontSize = (pStyle.fontSize || 12) * numFs;
+						else if (rawFs.indexOf("%") > 0) cStyle.fontSize = (pStyle.fontSize || 12) * (numFs / 100);
+						else cStyle.fontSize = numFs;
+					}
+				}
+
+				var alignAttr = inlineMap["text-align"] || (node.getAttribute ? node.getAttribute("align") : null);
+				if (alignAttr)
+				{
+					cStyle.align = alignAttr.toLowerCase().trim();
+				}
+
+				var isBlock = !!blockTags[tag] || inlineMap["display"] === "block";
+
+				if (tag === "UL")
+				{
+					cStyle.bullet = 1;
+					cStyle.inOL = false;
+					if (!alignAttr) cStyle.align = "left";
+				}
+				else if (tag === "OL")
+				{
+					cStyle.bullet = 0;
+					cStyle.inOL = true;
+					if (!alignAttr) cStyle.align = "left";
+				}
+
+				if (isBlock && currentPara.runs.length > 0)
+				{
+					flushParagraph(cStyle.align, cStyle.bullet);
+				}
+				else if (isBlock)
+				{
+					currentPara.align = cStyle.align;
+					currentPara.bullet = cStyle.bullet;
+				}
+
+				if (tag === "LI" && cStyle.inOL)
+				{
+					addRun((olCounter++) + ". ", cStyle);
+				}
+
+				if (node.childNodes && node.childNodes.length > 0)
+				{
+					// Special case: <div><br></div> represents an explicit blank line
+					if (isBlock && node.childNodes.length === 1 &&
+						node.childNodes[0].nodeType === 1 &&
+						(node.childNodes[0].nodeName || "").toUpperCase() === "BR")
+					{
+						flushParagraph(pStyle.align, pStyle.bullet);
+					}
+					else
+					{
+						walkNodes(node.childNodes, cStyle);
+					}
+				}
+
+				if (isBlock && currentPara.runs.length > 0)
+				{
+					flushParagraph(pStyle.align, pStyle.bullet);
+				}
+			}
+		}
+	};
+
+	walkNodes(container.childNodes, baseStyle);
+
+	if (currentPara.runs.length > 0 || paragraphs.length === 0)
+	{
+		paragraphs.push(currentPara);
+	}
+
+	return paragraphs;
 };
 
 /**
  * Function: text
  * 
- * Paints the given text. Possible values for format are empty string for
- * plain text and html for HTML markup. HTML labels
- * are not available as part of shapes with no foreignObject support in SVG
- * (eg. IE9, IE10).
- * 
- * Parameters:
- * 
- * x - Number that represents the x-coordinate of the text.
- * y - Number that represents the y-coordinate of the text.
- * w - Number that represents the available width for the text or 0 for automatic width.
- * h - Number that represents the available height for the text or 0 for automatic height.
- * str - String that specifies the text to be painted.
- * align - String that represents the horizontal alignment.
- * valign - String that represents the vertical alignment.
- * wrap - Boolean that specifies if word-wrapping is enabled. Requires w > 0.
- * format - Empty string for plain text or 'html' for HTML markup.
- * overflow - Specifies the overflow behaviour of the label. Requires w > 0 and/or h > 0.
- * clip - Boolean that specifies if the label should be clipped. Requires w > 0 and/or h > 0.
- * rotation - Number that specifies the angle of the rotation around the anchor point of the text.
- * dir - Optional string that specifies the text direction. Possible values are rtl and lrt.
+ * Paints the given text into Visio Character, Paragraph, and Text elements.
  */
 mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, format, overflow, clip, rotation, dir)
 {
@@ -730,37 +1027,34 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 			str = mxUtils.getOuterHtml(str);
 		}
 
-		//This is the case with edges
-		if (w == 0 && h == 0)
-		{
-			var strSize = mxUtils.getSizeForString(str, that.cellState.style["fontSize"], that.cellState.style["fontFamily"]);
-			w = strSize.width * 2;
-			h = strSize.height * 2;
-		}
-		
-		//TODO support HTML text formatting and remaining attributes
-		if (format == 'html')
-    	{
-    		if (mxUtils.getValue(this.cellState.style, 'nl2Br', '1') != '0')
-			{
-				// Removes newlines from HTML and converts breaks to newlines
-				// to match the HTML output in plain text
-    			str = str.replace(/\n/g, '').replace(/<br\s*.?>/g, '\n');
-			}
-    		
-    		// Removes HTML tags
-			if (this.html2txtDiv == null)
-				this.html2txtDiv = document.createElement('div');
-			
-			this.html2txtDiv.innerHTML = Graph.sanitizeHtml(str);
-			str = mxUtils.extractTextWithWhitespace(this.html2txtDiv.childNodes);
-    	}
-		
+		var cellStyle = (this.cellState != null && this.cellState.style != null) ? this.cellState.style : {};
+		var baseFontSize = parseFloat(mxUtils.getValue(cellStyle, mxConstants.STYLE_FONTSIZE, mxConstants.DEFAULT_FONTSIZE || 12));
+		var baseFontFamily = mxUtils.getValue(cellStyle, mxConstants.STYLE_FONTFAMILY, mxConstants.DEFAULT_FONTFAMILY || "Calibri");
+		var baseFontColor = this.normalizeColor(mxUtils.getValue(cellStyle, mxConstants.STYLE_FONTCOLOR, "#000000"), "#000000");
+		var baseFontStyle = parseInt(mxUtils.getValue(cellStyle, mxConstants.STYLE_FONTSTYLE, 0), 10) || 0;
+		var baseAlign = align || mxUtils.getValue(cellStyle, mxConstants.STYLE_ALIGN, "center");
+		var baseValign = valign || mxUtils.getValue(cellStyle, mxConstants.STYLE_VERTICAL_ALIGN, "middle");
+
+		var baseStyle = {
+			fontColor: baseFontColor,
+			fontSize: baseFontSize,
+			fontFamily: baseFontFamily,
+			align: baseAlign,
+			bold: (baseFontStyle & 1) !== 0,
+			italic: (baseFontStyle & 2) !== 0,
+			underline: (baseFontStyle & 4) !== 0,
+			strikethrough: (baseFontStyle & 8) !== 0,
+			pos: 0,
+			bullet: 0
+		};
+
+		var paragraphs = this.parseTextParagraphs(str, format, baseStyle);
+
 		var s = this.state;
 		var geo = this.xmGeo;
 
-		w = w * s.scale;
-		h = h * s.scale;
+		var scaledW = w * s.scale;
+		var scaledH = h * s.scale;
 
 		var charSect = this.createElt("Section");
 		charSect.setAttribute('N', 'Character');
@@ -768,328 +1062,257 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 		var pSect = this.createElt("Section");
 		pSect.setAttribute('N', 'Paragraph');
 
-		var text = this.createElt("Text");
+		var textEl = this.createElt("Text");
 
-		var rowIndex = 0, pIndex = 0;
-		var calcW = 0, calcH = 0, lastW = 0, lastH = 0, lineH = 0;
-		
-		var createTextRow = function(styleMap, charSect, pSect, textEl, txt) 
+		var charIndex = 0;
+		var pIndex = 0;
+		var calcW = 0, calcH = 0;
+
+		var mapHorzAlign = function(a)
 		{
-			var fontSize = styleMap['fontSize'];
-			var fontFamily = styleMap['fontFamily'];
-			
-			var strRect = mxUtils.getSizeForString(txt, fontSize, fontFamily);
-			var wrapped = false;
-			
-			if (wrap && strRect.width > w) 
+			switch (a)
 			{
-				strRect = mxUtils.getSizeForString(txt, fontSize, fontFamily, w);
-				wrapped = true;
-			}
-
-			if (styleMap['blockElem'])
-			{
-				lastW += strRect.width;
-				calcW = Math.min(Math.max(calcW, lastW), w);
-				lastW = 0;
-				lastH = Math.max(lastH, strRect.height);
-				calcH += lastH + lineH;
-				lineH = lastH;
-				lastH = 0;
-			}
-			else 
-			{
-				lastW += strRect.width;
-				calcW = Math.min(Math.max(calcW, lastW), w);
-				lastH = Math.max(lastH, strRect.height);
-				calcH = Math.max(calcH, lastH);
-			}
-			
-			var charRow = that.createElt("Row");
-			charRow.setAttribute('IX', rowIndex);
-			
-			
-			if (styleMap['fontColor'])	charRow.appendChild(that.createCellElem("Color", mxUtils.rgba2hex(styleMap['fontColor'])));
-			
-			if (fontSize)	charRow.appendChild(that.createCellElemScaled("Size", fontSize * 0.97)); //the magic number 0.97 is needed such that text do not overflow
-			
-			if (fontFamily)	charRow.appendChild(that.createCellElem("Font", fontFamily));
-			
-			//0x00 No format
-			//0x01 Specifies that the text run has a bold character property. 
-			//0x02 Specifies that the text run has an italic character property. 
-			//0x04 Specifies that the text run has an underline character property. 
-			//0x08 Specifies that the text run has a small caps character property.
-			var style = 0;
-			if (styleMap['bold']) style |= 0x11;	
-			if (styleMap['italic']) style |= 0x22;
-			if (styleMap['underline']) style |= 0x4;
-			
-			charRow.appendChild(that.createCellElem("Style", style));
-			charRow.appendChild(that.createCellElem("Case", "0"));
-			charRow.appendChild(that.createCellElem("Pos", "0"));
-			charRow.appendChild(that.createCellElem("FontScale", "1"));
-			charRow.appendChild(that.createCellElem("Letterspace", "0"));
-			
-			charSect.appendChild(charRow);
-			
-			var pRow = that.createElt("Row");
-			pRow.setAttribute('IX', pIndex);
-			
-			var align = 1; //center is default
-			
-			switch(styleMap['align'])
-			{
-				case 'left': align = 0; break;
-				case 'center': align = 1; break;
-				case 'right': align = 2; break;
-				case 'start': align = 0; break; //TODO check right-to-left
-				case 'end': align = 2; break; //TODO check right-to-left
-				case 'justify': align = 0; break;
+				case 'left':
+				case 'start':
+					return (dir === 'rtl' && a === 'start') ? 2 : 0;
+				case 'right':
+				case 'end':
+					return (dir === 'rtl' && a === 'end') ? 0 : 2;
+				case 'justify':
+					return 3;
+				case 'center':
 				default:
-					align = 1;
+					return 1;
 			}
-			
-			pRow.appendChild(that.createCellElem("HorzAlign", align));
-//			pRow.appendChild(that.createCellElem("SpLine", "-1.2"));
-			pSect.appendChild(pRow);
-			
-//			var pp = that.createElt("pp");
-//			pp.setAttribute('IX', pIndex++);
-//			textEl.appendChild(pp);
-			var cp = that.createElt("cp");
-			cp.setAttribute('IX', rowIndex++);
-			textEl.appendChild(cp);
-			var txtNode = that.xmlDoc.createTextNode(txt + (styleMap['blockElem']? "\n" : ""));  
-			textEl.appendChild(txtNode);
 		};
 
-		var processNodeChildren = function(ch, pStyle) 
+		for (var pIdx = 0; pIdx < paragraphs.length; pIdx++)
 		{
-			pStyle = pStyle || {};
-			for (var i=0; i<ch.length; i++) 
-			{
-				var curCh = ch[i];
-				
-				if (curCh.nodeType == 3) 
-				{ //#text
-					var fontStyle = that.cellState.style["fontStyle"];
-					var styleMap = {
-						fontColor: pStyle['fontColor'] || that.cellState.style["fontColor"],
-						fontSize: pStyle['fontSize'] || that.cellState.style["fontSize"],
-						fontFamily: pStyle['fontFamily'] || that.cellState.style["fontFamily"],
-						align: pStyle['align'] || that.cellState.style["align"],
-						bold: pStyle['bold'] || (fontStyle & 1),
-						italic: pStyle['italic'] || (fontStyle & 2),
-						underline: pStyle['underline'] || (fontStyle & 4)
-					};
-					
-					var brNext = false;
-					
-					if (i + 1 < ch.length && ch[i + 1].nodeName.toUpperCase() == 'BR')
-					{
-						brNext = true;
-						i++;
-					}
-					
-					//VSDX doesn't have numbered list!
-					createTextRow(styleMap, charSect, pSect, text, (pStyle['OL']? pStyle['LiIndex'] + '. ' : '') + curCh.textContent + (brNext? '\n' : ''));
-				} 
-				else if (curCh.nodeType == 1) 
-				{ //element
-					var nodeName = curCh.nodeName.toUpperCase();
-					var chLen = curCh.childNodes.length;
-					var style = window.getComputedStyle(curCh, null);
-					var styleMap = {
-						bold: style.getPropertyValue('font-weight') == 'bold' || pStyle['bold'],
-						italic: style.getPropertyValue('font-style') == 'italic' || pStyle['italic'],
-						underline: style.getPropertyValue('text-decoration').indexOf('underline') >= 0 || pStyle['underline'],
-						align: style.getPropertyValue('text-align'),
-						fontColor: style.getPropertyValue('color'),
-						fontSize: parseFloat(style.getPropertyValue('font-size')),
-						fontFamily: style.getPropertyValue('font-family').replace(/"/g, ''), //remove quotes
-						blockElem: style.getPropertyValue('display') == 'block' || nodeName == "BR" || nodeName == "LI",
-						OL: pStyle['OL'],
-						LiIndex: pStyle['LiIndex']
-					};
-					
-					if (nodeName == "UL")
-					{
-						var pRow = that.createElt("Row");
-						pRow.setAttribute('IX', pIndex);
-						
-						pRow.appendChild(that.createCellElem("HorzAlign", "0"));
-						pRow.appendChild(that.createCellElem("Bullet", "1"));
-						pSect.appendChild(pRow);
-						
-						var pp = that.createElt("pp");
-						pp.setAttribute('IX', pIndex++);
-						text.appendChild(pp);
-					}
-					//VSDX doesn't have numbered list!
-					else if (nodeName == "OL")
-					{
-						styleMap['OL'] = true;
-					}
-					else if (nodeName == "LI")
-					{
-						styleMap['LiIndex'] = i + 1;
-					}
-					
-					if (chLen > 0)
-					{
-						processNodeChildren(curCh.childNodes, styleMap);
-						
-						//Close the UL by adding another pp with no Vullets
-						if (nodeName == "UL")
-						{
-							var pRow = that.createElt("Row");
-							pRow.setAttribute('IX', pIndex);
-							
-							pRow.appendChild(that.createCellElem("Bullet", "0"));
-							pSect.appendChild(pRow);
-							
-							var pp = that.createElt("pp");
-							pp.setAttribute('IX', pIndex++);
-							text.appendChild(pp);
-						}
+			var para = paragraphs[pIdx];
+			var isLastPara = (pIdx === paragraphs.length - 1);
 
-						createTextRow(styleMap, charSect, pSect, text, ""); //to handle block elements if any
-					}
-					else
-					{
-						//VSDX doesn't have numbered list!
-						createTextRow(styleMap, charSect, pSect, text, (pStyle['OL']? pStyle['LiIndex'] + '. ' : '') + curCh.textContent);
-					}
+			// Create Paragraph Row for this paragraph
+			var pRow = this.createElt("Row");
+			pRow.setAttribute('IX', pIndex);
+			pRow.appendChild(this.createCellElem("HorzAlign", mapHorzAlign(para.align)));
+			if (para.bullet)
+			{
+				pRow.appendChild(this.createCellElem("Bullet", "1"));
+			}
+			else
+			{
+				pRow.appendChild(this.createCellElem("Bullet", "0"));
+			}
+			pSect.appendChild(pRow);
+
+			var pp = this.createElt("pp");
+			pp.setAttribute('IX', pIndex++);
+			textEl.appendChild(pp);
+
+			var paraW = 0;
+			var paraH = 0;
+
+			if (para.runs.length === 0)
+			{
+				// Empty line
+				var emptySize = (typeof mxUtils !== "undefined" && mxUtils.getSizeForString) ?
+					mxUtils.getSizeForString(" ", baseFontSize, baseFontFamily) :
+					{ width: baseFontSize * 0.5, height: baseFontSize * 1.2 };
+				paraH = emptySize.height;
+				if (!isLastPara)
+				{
+					textEl.appendChild(this.xmlDoc.createTextNode("\n"));
 				}
 			}
-		};
-		
-		if (format == 'html' && mxClient.IS_SVG)
-		{
-			//Get the actual HTML label node
-			var elt = this.cellState.text.node.getElementsByTagName('div')[mxClient.NO_FO? 0 : 1];
-			
-			if (elt != null)
+			else
 			{
-				var ch = elt.childNodes;
-				
-				processNodeChildren(ch, {});
+				for (var rIdx = 0; rIdx < para.runs.length; rIdx++)
+				{
+					var run = para.runs[rIdx];
+					var isLastRunInPara = (rIdx === para.runs.length - 1);
+					var rFontSize = run.fontSize || baseFontSize;
+					var rFontFamily = run.fontFamily || baseFontFamily;
+
+					var strRect = (typeof mxUtils !== "undefined" && mxUtils.getSizeForString) ?
+						mxUtils.getSizeForString(run.text, rFontSize, rFontFamily) :
+						{ width: run.text.length * rFontSize * 0.6, height: rFontSize * 1.2 };
+
+					if (wrap && scaledW > 0 && (paraW + strRect.width) > scaledW && typeof mxUtils !== "undefined" && mxUtils.getSizeForString)
+					{
+						strRect = mxUtils.getSizeForString(run.text, rFontSize, rFontFamily, scaledW);
+					}
+
+					paraW += strRect.width;
+					paraH = Math.max(paraH, strRect.height);
+
+					var charRow = this.createElt("Row");
+					charRow.setAttribute('IX', charIndex);
+
+					if (run.fontColor)
+					{
+						charRow.appendChild(this.createCellElem("Color", this.normalizeColor(run.fontColor, "#000000")));
+					}
+					if (rFontSize)
+					{
+						// 0.97 factor prevents slight font metric overflow in Visio
+						charRow.appendChild(this.createCellElemScaled("Size", rFontSize * 0.97));
+					}
+					if (rFontFamily)
+					{
+						charRow.appendChild(this.createCellElem("Font", rFontFamily));
+					}
+
+					// Visio Character Style bitmask:
+					// 0x01 = Bold, 0x02 = Italic, 0x04 = Underline, 0x08 = Small caps
+					var styleBits = 0;
+					if (run.bold) styleBits |= 0x01;
+					if (run.italic) styleBits |= 0x02;
+					if (run.underline) styleBits |= 0x04;
+
+					charRow.appendChild(this.createCellElem("Style", styleBits));
+					charRow.appendChild(this.createCellElem("Strikethru", run.strikethrough ? "1" : "0"));
+					charRow.appendChild(this.createCellElem("Case", "0"));
+					charRow.appendChild(this.createCellElem("Pos", (run.pos || 0) + ""));
+					charRow.appendChild(this.createCellElem("FontScale", "1"));
+					charRow.appendChild(this.createCellElem("Letterspace", "0"));
+
+					charSect.appendChild(charRow);
+
+					var cp = this.createElt("cp");
+					cp.setAttribute('IX', charIndex++);
+					textEl.appendChild(cp);
+
+					var outTxt = run.text + (isLastRunInPara && !isLastPara ? "\n" : "");
+					textEl.appendChild(this.xmlDoc.createTextNode(outTxt));
+				}
+			}
+
+			calcW = (scaledW > 0 && wrap) ? Math.min(Math.max(calcW, paraW), scaledW) : Math.max(calcW, paraW);
+			calcH += paraH;
+		}
+
+		// Set VerticalAlign on shape (0 = Top, 1 = Middle, 2 = Bottom)
+		var visioValign = 1;
+		if (baseValign === "top") visioValign = 0;
+		else if (baseValign === "bottom") visioValign = 2;
+		this.shape.appendChild(this.createCellElem("VerticalAlign", visioValign));
+
+		var isEdge = (geo != null && geo.isEdge) ||
+			(this.cellState != null && this.cellState.view != null && this.cellState.view.graph != null &&
+			 this.cellState.view.graph.getModel().isEdge(this.cellState.cell));
+
+		if (isEdge)
+		{
+			// 1D connector label positioning:
+			// geo.x and geo.y are the connector's Begin point in model coordinates;
+			// geo.width = EndX - BeginX, geo.height = EndY - BeginY (in Visio coordinates).
+			var boxW = Math.max(scaledW, calcW * 1.15, baseFontSize * 2);
+			var boxH = Math.max(scaledH, calcH * 1.15, baseFontSize * 1.5);
+
+			var lx = (x - geo.x + s.dx) * s.scale;
+			var ly = -(y - geo.y + s.dy) * s.scale;
+
+			if (baseAlign === "left") lx += boxW / 2;
+			else if (baseAlign === "right") lx -= boxW / 2;
+
+			if (baseValign === "top") ly -= boxH / 2;
+			else if (baseValign === "bottom") ly += boxH / 2;
+
+			var txtPinXF = (Math.abs(geo.width) > 1e-6) ? ("Width*" + (+(lx / geo.width).toFixed(6))) : null;
+			var txtPinYF = (Math.abs(geo.height) > 1e-6) ? ("Height*" + (+(ly / geo.height).toFixed(6))) : null;
+
+			this.shape.appendChild(this.createCellElemScaled("TxtPinX", lx, txtPinXF));
+			this.shape.appendChild(this.createCellElemScaled("TxtPinY", ly, txtPinYF));
+			this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW));
+			this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH));
+			this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", boxW / 2, "TxtWidth*0.5"));
+			this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", boxH / 2, "TxtHeight*0.5"));
+
+			if (rotation != null && rotation != 0)
+			{
+				this.shape.appendChild(this.createCellElem("TxtAngle", (360 - rotation) * Math.PI / 180));
 			}
 		}
 		else
 		{
-			//If it is not HTML or SVG, we fall back to removing html format
-			var styleMap = {
-				fontColor: that.cellState.style["fontColor"],
-				fontSize: that.cellState.style["fontSize"],
-				fontFamily: that.cellState.style["fontFamily"]
-			};
-			createTextRow(styleMap, charSect, pSect, text, str);
+			// 2D vertex label positioning:
+			// Check if label is placed externally via labelPosition / verticalLabelPosition
+			var hpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_LABEL_POSITION, mxConstants.ALIGN_CENTER);
+			var vpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_VERTICAL_LABEL_POSITION, mxConstants.ALIGN_MIDDLE);
+
+			var boxW = (hpos !== mxConstants.ALIGN_CENTER) ? Math.max(calcW, baseFontSize) : Math.max(scaledW, calcW);
+			var boxH = (vpos !== mxConstants.ALIGN_MIDDLE) ? Math.max(calcH, baseFontSize) : Math.max(scaledH, calcH);
+
+			// Shape rotation (includes direction=north|south|west rotation if state.shape is present)
+			var shapeRot = (this.cellState != null && this.cellState.shape != null && this.cellState.shape.getShapeRotation) ?
+				(this.cellState.shape.getShapeRotation() || 0) :
+				parseFloat(mxUtils.getValue(cellStyle, mxConstants.STYLE_ROTATION, '0'));
+			var textRot = (rotation != null) ? parseFloat(rotation) : 0;
+
+			// In mxCellRenderer.rotateLabelBounds, (x, y) was rotated around the shape center by textRot.
+			// Undo textRot around the shape center to recover the unrotated anchor (ux, uy):
+			var cellCenterX = (geo.x - s.dx) + geo.width / 2;
+			var cellCenterY = (geo.y - s.dy) + geo.height / 2;
+
+			var ux = x;
+			var uy = y;
+			if (textRot !== 0)
+			{
+				var rad = -textRot * Math.PI / 180;
+				var cos = Math.cos(rad);
+				var sin = Math.sin(rad);
+				var dx0 = x - cellCenterX;
+				var dy0 = y - cellCenterY;
+				ux = cellCenterX + dx0 * cos - dy0 * sin;
+				uy = cellCenterY + dx0 * sin + dy0 * cos;
+			}
+
+			// Compute the center of the text box in unrotated coordinates:
+			// ux is at the left/center/right of the text box depending on baseAlign;
+			// uy is at the top/middle/bottom of the text box depending on baseValign.
+			var boxCenterX = ux;
+			if (baseAlign === "left") boxCenterX += (boxW / s.scale) / 2;
+			else if (baseAlign === "right") boxCenterX -= (boxW / s.scale) / 2;
+
+			var boxCenterY = uy;
+			if (baseValign === "top") boxCenterY += (boxH / s.scale) / 2;
+			else if (baseValign === "bottom") boxCenterY -= (boxH / s.scale) / 2;
+
+			// If textRot != shapeRot (e.g. horizontal label inside a direction=north shape),
+			// rotate boxCenter around cellCenter by (textRot - shapeRot) into the shape's rotated frame:
+			var deltaRot = textRot - shapeRot;
+			if (deltaRot !== 0)
+			{
+				var dRad = deltaRot * Math.PI / 180;
+				var dCos = Math.cos(dRad);
+				var dSin = Math.sin(dRad);
+				var dcx = boxCenterX - cellCenterX;
+				var dcy = boxCenterY - cellCenterY;
+				boxCenterX = cellCenterX + dcx * dCos - dcy * dSin;
+				boxCenterY = cellCenterY + dcx * dSin + dcy * dCos;
+			}
+
+			var localPinX = (boxCenterX - geo.x + s.dx) * s.scale;
+			var localPinY = (geo.height - boxCenterY + geo.y - s.dy) * s.scale;
+
+			this.shape.appendChild(this.createCellElemScaled("TxtPinX", localPinX));
+			this.shape.appendChild(this.createCellElemScaled("TxtPinY", localPinY));
+			this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW));
+			this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH));
+			this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", boxW / 2));
+			this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", boxH / 2));
+
+			var relTextAngle = textRot - shapeRot;
+			if (relTextAngle !== 0)
+			{
+				var normAngle = ((360 - relTextAngle) % 360 + 360) % 360;
+				this.shape.appendChild(this.createCellElem("TxtAngle", normAngle * Math.PI / 180));
+			}
 		}
 
-		var wShift = 0, hShift = 0;
-
-		h = Math.max(h, calcH); 
-		w = Math.max(w, calcW);
-		var hw = w/2, hh = h/2;
-		var pRotDegrees = parseInt(mxUtils.getValue(this.cellState.style, 'rotation', '0'));
-		var pRot = pRotDegrees * Math.PI / 180;
-
-		//TODO Fix align and valign for rotated cases. Currently, all rotated shapes labels are centered
-		switch(align) 
-		{
-			case "right": 
-				if (pRotDegrees != 0) 
-				{
-					x -= hw * Math.cos(pRot);
-					y -= hw * Math.sin(pRot);
-				}
-				else 
-				{
-					wShift = calcW/2;
-				}
-			break;
-			case "center":
-				//nothing
-			break;
-			case "left":
-				if (pRotDegrees != 0) 
-				{
-					x += hw * Math.cos(pRot);
-					y += hw * Math.sin(pRot);
-				}
-				else
-				{
-					wShift = -calcW/2;
-				}
-			break;
-		}
-
-		switch(valign) 
-		{
-			case "top": 
-				if (pRotDegrees != 0) 
-				{
-					x += hh * Math.sin(pRot);
-					y += hh * Math.cos(pRot);
-				}
-				else
-				{
-					hShift = calcH/2;
-				}
-			break;
-			case "middle":
-				//nothing
-			break;
-			case "bottom": 
-				if (pRotDegrees != 0) 
-				{
-					x -= hh * Math.sin(pRot);
-					y -= hh * Math.cos(pRot);
-				}
-				else
-				{
-					hShift = -calcH/2;
-				}
-			break;
-		}
-
-		x = (x - geo.x + s.dx) * s.scale;
-		y = (geo.height - y + geo.y - s.dy) * s.scale;
-
-		this.shape.appendChild(this.createCellElemScaled("TxtPinX", x));
-		this.shape.appendChild(this.createCellElemScaled("TxtPinY", y));
-		this.shape.appendChild(this.createCellElemScaled("TxtWidth", w));
-		this.shape.appendChild(this.createCellElemScaled("TxtHeight", h));
-        this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", hw + wShift));
-        this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", hh + hShift));
-
-		
-		rotation -= pRotDegrees;
-		
-		if (rotation != 0)
-			this.shape.appendChild(this.createCellElem("TxtAngle", (360 - rotation) * Math.PI / 180));
-
-		
-		
 		this.shape.appendChild(charSect);
 		this.shape.appendChild(pSect);
-		this.shape.appendChild(text);
-//		if (overflow != null)
-//		{
-//			elem.setAttribute('overflow', overflow);
-//		}
-//		
-//		if (clip != null)
-//		{
-//			elem.setAttribute('clip', (clip) ? '1' : '0');
-//		}
-//		
-//		if (dir != null)
-//		{
-//			elem.setAttribute('dir', dir);
-//		}
+		this.shape.appendChild(textEl);
 	}
 };
 
@@ -1100,7 +1323,7 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
  */
 mxVsdxCanvas2D.prototype.rotate = function(theta, flipH, flipV, cx, cy)
 {
-	//Vsdx has flipX/Y support separate from rotation
+	// Vsdx has flipX/Y support separate from rotation
 	if (theta != 0)
 	{
 		var s = this.state;
@@ -1118,6 +1341,31 @@ mxVsdxCanvas2D.prototype.rotate = function(theta, flipH, flipV, cx, cy)
 	}
 };
 
+/**
+ * Helper to apply NoFill/NoLine to all pending Geometry sections in the current path
+ * and append them to the shape.
+ */
+mxVsdxCanvas2D.prototype.finishPendingGeos = function(noFill, noLine)
+{
+	var sections = (this.pendingGeoSecs != null && this.pendingGeoSecs.length > 0) ?
+		this.pendingGeoSecs : (this.geoSec != null ? [this.geoSec] : []);
+
+	for (var i = 0; i < sections.length; i++)
+	{
+		var sec = sections[i];
+		if (sec.childNodes.length > 0)
+		{
+			sec.appendChild(this.createCellElem("NoFill", noFill));
+			sec.appendChild(this.createCellElem("NoLine", noLine));
+			if (sec.parentNode == null)
+			{
+				this.shape.appendChild(sec);
+			}
+		}
+	}
+
+	this.pendingGeoSecs = [];
+};
 
 /**
  * Function: stroke
@@ -1126,8 +1374,8 @@ mxVsdxCanvas2D.prototype.rotate = function(theta, flipH, flipV, cx, cy)
  */
 mxVsdxCanvas2D.prototype.stroke = function()
 {
-	this.geoSec.appendChild(this.createCellElem("NoFill", "1"));
-	this.geoSec.appendChild(this.createCellElem("NoLine", "0"));
+	var noLine = (this.state != null && (this.state.strokeColor === null || this.state.strokeColor === "none")) ? "1" : "0";
+	this.finishPendingGeos("1", noLine);
 };
 
 /**
@@ -1137,8 +1385,8 @@ mxVsdxCanvas2D.prototype.stroke = function()
  */
 mxVsdxCanvas2D.prototype.fill = function()
 {
-	this.geoSec.appendChild(this.createCellElem("NoFill", "0"));
-	this.geoSec.appendChild(this.createCellElem("NoLine", "1"));
+	var noFill = (this.state != null && (this.state.fillColor === null || this.state.fillColor === "none")) ? "1" : "0";
+	this.finishPendingGeos(noFill, "1");
 };
 
 /**
@@ -1148,6 +1396,7 @@ mxVsdxCanvas2D.prototype.fill = function()
  */
 mxVsdxCanvas2D.prototype.fillAndStroke = function()
 {
-	this.geoSec.appendChild(this.createCellElem("NoFill", "0"));
-	this.geoSec.appendChild(this.createCellElem("NoLine", "0"));
+	var noFill = (this.state != null && (this.state.fillColor === null || this.state.fillColor === "none")) ? "1" : "0";
+	var noLine = (this.state != null && (this.state.strokeColor === null || this.state.strokeColor === "none")) ? "1" : "0";
+	this.finishPendingGeos(noFill, noLine);
 };
