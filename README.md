@@ -41,15 +41,16 @@ This repository preserves the original source code and fixes the major quality a
    - Explicit anchor points on edges now generate `<Section N="Connection">` rows on target shapes and bind `BeginX`/`EndX` and `<Connect>` elements to `Connections.X{n}` instead of snapping to the center of the shape.
    - Group outer `<Shape>` elements now retain the primary cell VSDX ID so edges connected to a group bind to the group rather than a colliding `id + "10000"` string.
 
-4. **Rich HTML Text, Character Bitmasks, Paragraph Alignment & Whitespace**:
-   - Fixed Character `Style` bitmask bug where bold used `0x11` (17) instead of `0x01` (1) and italic used `0x22` (34) instead of `0x02` (2), and added `<Cell N="Strikethru" V="1"/>` and `<Cell N="Pos" V="1|2"/>` (superscript/subscript).
-   - Fixed commented-out `<pp IX="..."/>` and `pIndex++` in `mxVsdxCanvas2D.prototype.text`, which previously emitted duplicate `<Row IX="0">` elements in `<Section N="Paragraph">`.
+4. **Rich HTML Text, Character Bitmasks, Line Spacing (`SpLine`) & Whitespace**:
+   - Fixed Character `Style` bitmask bug where bold used `0x11` (17) instead of `0x01` (1) and italic used `0x02` (34) instead of `0x02` (2), and added `<Cell N="Strikethru" V="1"/>` and `<Cell N="Pos" V="1|2"/>` (superscript/subscript).
+   - Fixed commented-out `<pp IX="..."/>` and `pIndex++` in `mxVsdxCanvas2D.prototype.text`, deduplicated consecutive paragraph rows with identical `(HorzAlign, Bullet)`, and explicitly emitted `<Cell N="SpLine" V="-1.2"/>` on every `<Row>` in `<Section N="Paragraph">` (preventing Visio from defaulting `Row IX >= 1` to `SpLine="0"` and rendering lines on top of each other).
    - Replaced fragile `this.cellState.text.node.getElementsByTagName('div')[1]` + `window.getComputedStyle` logic (which failed on unrendered pages and failed to detect `font-weight: 700` as bold) with a direct HTML/CSS tree parser.
    - Added missing `xml:space="preserve"` on `<PageContents>` so Visio does not strip spaces between adjacent `<cp/>` text runs.
 
-5. **Text Alignment, Vertical Alignment & Rotated/External Labels**:
+5. **Text Alignment, Vertical Alignment & Auto-Growing Displaced/Edge Labels**:
    - Added `<Cell N="VerticalAlign" V="0|1|2"/>` on shapes (previously omitted, forcing all labels to vertically center).
    - Fixed `TxtPinX`, `TxtPinY`, `TxtLocPinX`, and `TxtLocPinY` calculation across `left`/`center`/`right` and `top`/`middle`/`bottom` alignments, rotated shapes, `direction=north|south|west` shapes, external labels (`labelPosition` / `verticalLabelPosition`), and 1D edge labels.
+   - Added `Width*` / `Height*` formulas on `TxtPinX` and `TxtPinY` plus auto-expanding `TEXTWIDTH(TheText)` / `TEXTHEIGHT(TheText,TxtWidth)` formulas on `TxtWidth` and `TxtHeight` and zeroed margins on displaced and edge labels so labels never wrap over themselves or get stuffed inside small icon shapes on Visio/draw.io round-trip.
 
 6. **Label Background Color (`TextBkgnd`)**:
    - Fixed `//TODO for some reason, visio doesn't show the label (text) background color!` by writing the required `F="RGB(r,g,b)"` formula and `TextBkgndTrans=0` on `TextBkgnd` (without `RGB(...)`, Visio treats `TextBkgnd` as a 1-based palette index).
@@ -72,11 +73,16 @@ This repository preserves the original source code and fixes the major quality a
 Recent versions of draw.io Desktop removed external plugin loading (`--enable-plugins` is ignored and `isPluginsEnabled` is hardcoded to `false` in `electron.js`). Use [`scripts/patch-desktop-asar.js`](./scripts/patch-desktop-asar.js) to inject the fixed exporter directly into draw.io Desktop's `app.asar` (`PostConfig.js` and `plugins/vsdx.js`):
 
 ```bash
-# Patch draw.io Desktop (automatically backs up /opt/drawio/resources/app.asar.bak)
+# Option A: Build patched app.asar as your regular user, then copy with sudo (recommended if using nvm)
+node scripts/patch-desktop-asar.js --output dist/app.asar
+sudo cp /opt/drawio/resources/app.asar /opt/drawio/resources/app.asar.bak
+sudo cp dist/app.asar /opt/drawio/resources/app.asar
+
+# Option B: Patch directly in-place (automatically backs up /opt/drawio/resources/app.asar.bak)
 sudo "$(which node)" scripts/patch-desktop-asar.js
 
 # To restore the original unpatched app.asar:
-sudo "$(which node)" scripts/patch-desktop-asar.js --restore
+sudo cp /opt/drawio/resources/app.asar.bak /opt/drawio/resources/app.asar
 ```
 
 After patching, launch draw.io Desktop normally (no flags required) and use **File → Export as → VSDX...**.
