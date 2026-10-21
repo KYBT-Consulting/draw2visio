@@ -374,15 +374,18 @@ console.log('Running VsdxExport & mxVsdxCanvas2D test suite...');
 	assert.strictEqual(strikeCells.Style.V, '2', 'Italic style bitmask must be 2 (0x02), not 34 (0x22)');
 	assert.strictEqual(strikeCells.Strikethru.V, '1', 'Strikethru cell must be 1 for <s> tag');
 
-	// Verify Paragraph rows have distinct incrementing IX and matching <pp IX="..."/>
+	// Verify Paragraph rows have distinct incrementing IX, SpLine=-1.2 on all rows, and matching <pp IX="..."/>
 	const paraRows = paraSec.children;
 	assert.strictEqual(paraRows.length, 3, 'Should have 3 Paragraph rows');
 	assert.strictEqual(paraRows[0].getAttribute('IX'), '0');
 	assert.strictEqual(paraRows[1].getAttribute('IX'), '1');
 	assert.strictEqual(paraRows[2].getAttribute('IX'), '2');
 	assert.strictEqual(getCellMap(paraRows[0]).HorzAlign.V, '0', 'First paragraph should be left-aligned (0)');
+	assert.strictEqual(getCellMap(paraRows[0]).SpLine.V, '-1.2', 'First paragraph row must set SpLine=-1.2');
 	assert.strictEqual(getCellMap(paraRows[1]).HorzAlign.V, '2', 'Second paragraph should be right-aligned (2)');
+	assert.strictEqual(getCellMap(paraRows[1]).SpLine.V, '-1.2', 'Subsequent paragraph rows (IX>=1) must explicitly set SpLine=-1.2 so lines do not overlap');
 	assert.strictEqual(getCellMap(paraRows[2]).Bullet.V, '1', 'Third paragraph (UL/LI) should have Bullet=1');
+	assert.strictEqual(getCellMap(paraRows[2]).SpLine.V, '-1.2', 'Bullet paragraph row must set SpLine=-1.2');
 
 	const ppNodes = textEl.children.filter(c => c.nodeName === 'pp');
 	assert.strictEqual(ppNodes.length, 3, 'Text element should contain 3 <pp/> elements');
@@ -392,7 +395,25 @@ console.log('Running VsdxExport & mxVsdxCanvas2D test suite...');
 
 	// Verify text content has no trailing newline at the very end
 	assert.strictEqual(textEl.textContent, 'Hello Bold and Strike\nRight line\nBullet item');
-	console.log('  ✓ Test 1 passed: Rich HTML text, bitmasks, paragraphs, bullets, VerticalAlign');
+
+	// Verify displaced/external label on a small icon shape uses auto-expanding TEXTWIDTH/TEXTHEIGHT formulas and 0 margins
+	const iconShape = doc.createElement('Shape');
+	const iconGeo = { x: 0, y: 0, width: 30, height: 30, clone() { return Object.assign({}, this); } };
+	const iconState = {
+		cell: { id: 'icon1', vertex: true, geometry: iconGeo },
+		style: { labelPosition: 'center', verticalLabelPosition: 'bottom', align: 'center', verticalAlign: 'top', whiteSpace: 'wrap' }
+	};
+	canvas.newShape(iconShape, iconState, doc, iconGeo);
+	canvas.text(15, 35, 0, 0, '<div><b>Application Gateway v2</b></div><div>WAF_v2 | Autoscaling</div>', 'center', 'top', true, 'html', null, false, 0, 'ltr');
+	const iconCells = getCellMap(iconShape);
+	assert(iconCells.TxtWidth.F && iconCells.TxtWidth.F.startsWith('Width*') && iconCells.TxtWidth.F.includes('TEXTWIDTH(TheText)'), 'Displaced label TxtWidth should have Width*...+TEXTWIDTH(TheText) formula');
+	assert(iconCells.TxtHeight.F && iconCells.TxtHeight.F.startsWith('Height*') && iconCells.TxtHeight.F.includes('TEXTHEIGHT(TheText,TxtWidth)'), 'Displaced label TxtHeight should have Height*...+TEXTHEIGHT(TheText,TxtWidth) formula');
+	assert.strictEqual(iconCells.LeftMargin.V, '0', 'Displaced label LeftMargin should be 0');
+	assert.strictEqual(iconCells.RightMargin.V, '0', 'Displaced label RightMargin should be 0');
+	const iconParaSec = iconShape.children.find(c => c.nodeName === 'Section' && c.getAttribute('N') === 'Paragraph');
+	assert.strictEqual(iconParaSec.children.length, 1, 'Consecutive lines with identical alignment/bullet should share a single Paragraph Row');
+
+	console.log('  ✓ Test 1 passed: Rich HTML text, bitmasks, paragraphs, SpLine=-1.2, auto-sizing TxtWidth/TxtHeight');
 }
 
 // ============================================================================

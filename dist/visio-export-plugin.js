@@ -2435,6 +2435,19 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 		var pIndex = 0;
 		var calcW = 0, calcH = 0;
 
+		var isEdge = (geo != null && geo.isEdge) ||
+			(this.cellState != null && this.cellState.view != null && this.cellState.view.graph != null &&
+			 this.cellState.view.graph.getModel().isEdge(this.cellState.cell));
+
+		var hpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_LABEL_POSITION, mxConstants.ALIGN_CENTER);
+		var vpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_VERTICAL_LABEL_POSITION, mxConstants.ALIGN_MIDDLE);
+		var isExternalLabel = !isEdge && (hpos !== mxConstants.ALIGN_CENTER || vpos !== mxConstants.ALIGN_MIDDLE);
+		var hasExplicitLabelWidth = cellStyle[mxConstants.STYLE_LABEL_WIDTH] != null;
+		var wrapToWidth = !!(wrap && scaledW > 0 && !isEdge && (!isExternalLabel || hasExplicitLabelWidth));
+
+		var rawLineHeight = parseFloat(mxUtils.getValue(cellStyle, 'lineHeight', '1.2'));
+		var spLineVal = (!isNaN(rawLineHeight) && rawLineHeight > 0) ? (-rawLineHeight) + "" : "-1.2";
+
 		var mapHorzAlign = function(a)
 		{
 			switch (a)
@@ -2453,28 +2466,45 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 			}
 		};
 
+		var lastHorzAlign = null;
+		var lastBullet = null;
+
 		for (var pIdx = 0; pIdx < paragraphs.length; pIdx++)
 		{
 			var para = paragraphs[pIdx];
 			var isLastPara = (pIdx === paragraphs.length - 1);
+			var horzAlignVal = mapHorzAlign(para.align);
+			var bulletVal = para.bullet ? "1" : "0";
 
-			// Create Paragraph Row for this paragraph
-			var pRow = this.createElt("Row");
-			pRow.setAttribute('IX', pIndex);
-			pRow.appendChild(this.createCellElem("HorzAlign", mapHorzAlign(para.align)));
-			if (para.bullet)
+			// Emit a new Paragraph Row and <pp/> when paragraph formatting changes (or on first paragraph).
+			// Every Paragraph Row must include SpLine (e.g. -1.2) because Visio's StyleSheet only defines
+			// Row IX=0; omitting SpLine on Row IX>=1 causes Visio to default SpLine to 0 (lines overlap).
+			if (pIdx === 0 || horzAlignVal !== lastHorzAlign || bulletVal !== lastBullet)
 			{
-				pRow.appendChild(this.createCellElem("Bullet", "1"));
-			}
-			else
-			{
-				pRow.appendChild(this.createCellElem("Bullet", "0"));
-			}
-			pSect.appendChild(pRow);
+				var pRow = this.createElt("Row");
+				pRow.setAttribute('IX', pIndex);
+				pRow.appendChild(this.createCellElem("IndFirst", "0"));
+				pRow.appendChild(this.createCellElem("IndLeft", "0"));
+				pRow.appendChild(this.createCellElem("IndRight", "0"));
+				pRow.appendChild(this.createCellElem("SpLine", spLineVal));
+				pRow.appendChild(this.createCellElem("SpBefore", "0"));
+				pRow.appendChild(this.createCellElem("SpAfter", "0"));
+				pRow.appendChild(this.createCellElem("HorzAlign", horzAlignVal));
+				pRow.appendChild(this.createCellElem("Bullet", bulletVal));
+				pRow.appendChild(this.createCellElem("BulletStr", ""));
+				pRow.appendChild(this.createCellElem("BulletFont", "0"));
+				pRow.appendChild(this.createCellElem("BulletFontSize", "-1"));
+				pRow.appendChild(this.createCellElem("TextPosAfterBullet", "0"));
+				pRow.appendChild(this.createCellElem("Flags", (dir === "rtl") ? "1" : "0"));
+				pSect.appendChild(pRow);
 
-			var pp = this.createElt("pp");
-			pp.setAttribute('IX', pIndex++);
-			textEl.appendChild(pp);
+				var pp = this.createElt("pp");
+				pp.setAttribute('IX', pIndex++);
+				textEl.appendChild(pp);
+
+				lastHorzAlign = horzAlignVal;
+				lastBullet = bulletVal;
+			}
 
 			var paraW = 0;
 			var paraH = 0;
@@ -2499,14 +2529,21 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 					var isLastRunInPara = (rIdx === para.runs.length - 1);
 					var rFontSize = run.fontSize || baseFontSize;
 					var rFontFamily = run.fontFamily || baseFontFamily;
+					var rFontStyle = (run.bold ? 1 : 0) | (run.italic ? 2 : 0) | (run.underline ? 4 : 0);
+
+					// Preserve leading/trailing spaces during HTML width measurement
+					var measureText = String(run.text).replace(/^ +| +$/g, function(m)
+					{
+						return new Array(m.length + 1).join("\u00a0");
+					});
 
 					var strRect = (typeof mxUtils !== "undefined" && mxUtils.getSizeForString) ?
-						mxUtils.getSizeForString(run.text, rFontSize, rFontFamily) :
-						{ width: run.text.length * rFontSize * 0.6, height: rFontSize * 1.2 };
+						mxUtils.getSizeForString(measureText, rFontSize, rFontFamily, null, rFontStyle) :
+						{ width: run.text.length * rFontSize * (run.bold ? 0.68 : 0.6), height: rFontSize * 1.25 };
 
-					if (wrap && scaledW > 0 && (paraW + strRect.width) > scaledW && typeof mxUtils !== "undefined" && mxUtils.getSizeForString)
+					if (wrapToWidth && (paraW + strRect.width) > scaledW && typeof mxUtils !== "undefined" && mxUtils.getSizeForString)
 					{
-						strRect = mxUtils.getSizeForString(run.text, rFontSize, rFontFamily, scaledW);
+						strRect = mxUtils.getSizeForString(measureText, rFontSize, rFontFamily, scaledW, rFontStyle);
 					}
 
 					paraW += strRect.width;
@@ -2554,8 +2591,23 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 				}
 			}
 
-			calcW = (scaledW > 0 && wrap) ? Math.min(Math.max(calcW, paraW), scaledW) : Math.max(calcW, paraW);
+			calcW = wrapToWidth ? Math.min(Math.max(calcW, paraW), scaledW) : Math.max(calcW, paraW);
 			calcH += paraH;
+		}
+
+		// Also consult draw.io's actual rendered DOM text boundingBox when available
+		if (this.cellState != null && this.cellState.text != null)
+		{
+			var tShape = this.cellState.text;
+			var tbb = tShape.unrotatedBoundingBox || tShape.boundingBox;
+			var viewScale = (this.cellState.view != null && this.cellState.view.scale) ? this.cellState.view.scale : 1;
+			if (tbb != null && tbb.width > 0 && tbb.height > 0 && (tShape.getTextRotation == null || !tShape.getTextRotation() || tShape.unrotatedBoundingBox != null))
+			{
+				var domW = (tbb.width / viewScale) * s.scale;
+				var domH = (tbb.height / viewScale) * s.scale;
+				calcW = wrapToWidth ? Math.min(Math.max(calcW, domW), scaledW) : Math.max(calcW, domW);
+				calcH = Math.max(calcH, domH);
+			}
 		}
 
 		// Set VerticalAlign on shape (0 = Top, 1 = Middle, 2 = Bottom)
@@ -2564,17 +2616,18 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 		else if (baseValign === "bottom") visioValign = 2;
 		this.shape.appendChild(this.createCellElem("VerticalAlign", visioValign));
 
-		var isEdge = (geo != null && geo.isEdge) ||
-			(this.cellState != null && this.cellState.view != null && this.cellState.view.graph != null &&
-			 this.cellState.view.graph.getModel().isEdge(this.cellState.cell));
-
 		if (isEdge)
 		{
 			// 1D connector label positioning:
-			// geo.x and geo.y are the connector's Begin point in model coordinates;
-			// geo.width = EndX - BeginX, geo.height = EndY - BeginY (in Visio coordinates).
-			var boxW = Math.max(scaledW, calcW * 1.15, baseFontSize * 2);
-			var boxH = Math.max(scaledH, calcH * 1.15, baseFontSize * 1.5);
+			// Zero out default 4pt margins from StyleSheet so tight labels do not wrap prematurely,
+			// and include Visio's TEXTWIDTH/TEXTHEIGHT formulas so the text area grows to fit.
+			this.shape.appendChild(this.createCellElem("LeftMargin", "0"));
+			this.shape.appendChild(this.createCellElem("RightMargin", "0"));
+			this.shape.appendChild(this.createCellElem("TopMargin", "0"));
+			this.shape.appendChild(this.createCellElem("BottomMargin", "0"));
+
+			var boxW = Math.max(scaledW, calcW * 1.25 + baseFontSize, baseFontSize * 2);
+			var boxH = Math.max(scaledH, calcH * 1.2 + baseFontSize * 0.5, baseFontSize * 1.5);
 
 			var lx = (x - geo.x + s.dx) * s.scale;
 			var ly = -(y - geo.y + s.dy) * s.scale;
@@ -2590,8 +2643,8 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 
 			this.shape.appendChild(this.createCellElemScaled("TxtPinX", lx, txtPinXF));
 			this.shape.appendChild(this.createCellElemScaled("TxtPinY", ly, txtPinYF));
-			this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW));
-			this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH));
+			this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW, "MAX(TEXTWIDTH(TheText),5*Char.Size)"));
+			this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH, "TEXTHEIGHT(TheText,TxtWidth)"));
 			this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", boxW / 2, "TxtWidth*0.5"));
 			this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", boxH / 2, "TxtHeight*0.5"));
 
@@ -2603,12 +2656,18 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 		else
 		{
 			// 2D vertex label positioning:
-			// Check if label is placed externally via labelPosition / verticalLabelPosition
-			var hpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_LABEL_POSITION, mxConstants.ALIGN_CENTER);
-			var vpos = mxUtils.getValue(cellStyle, mxConstants.STYLE_VERTICAL_LABEL_POSITION, mxConstants.ALIGN_MIDDLE);
+			var scaledGeoW = geo.width * s.scale;
+			var scaledGeoH = geo.height * s.scale;
 
-			var boxW = (hpos !== mxConstants.ALIGN_CENTER) ? Math.max(calcW, baseFontSize) : Math.max(scaledW, calcW);
-			var boxH = (vpos !== mxConstants.ALIGN_MIDDLE) ? Math.max(calcH, baseFontSize) : Math.max(scaledH, calcH);
+			var paddedCalcW = calcW * 1.25 + baseFontSize;
+			var paddedCalcH = calcH * 1.2 + baseFontSize * 0.5;
+
+			var boxW = isExternalLabel ?
+				(hasExplicitLabelWidth ? Math.max(scaledW, baseFontSize) : Math.max(paddedCalcW, baseFontSize * 2)) :
+				(wrapToWidth ? Math.max(scaledW, baseFontSize) : Math.max(scaledW, paddedCalcW));
+			var boxH = isExternalLabel ?
+				Math.max(paddedCalcH, baseFontSize * 1.5) :
+				Math.max(scaledH, paddedCalcH);
 
 			// Shape rotation (includes direction=north|south|west rotation if state.shape is present)
 			var shapeRot = (this.cellState != null && this.cellState.shape != null && this.cellState.shape.getShapeRotation) ?
@@ -2634,46 +2693,116 @@ mxVsdxCanvas2D.prototype.text = function(x, y, w, h, str, align, valign, wrap, f
 				uy = cellCenterY + dx0 * sin + dy0 * cos;
 			}
 
-			// Compute the center of the text box in unrotated coordinates:
-			// ux is at the left/center/right of the text box depending on baseAlign;
-			// uy is at the top/middle/bottom of the text box depending on baseValign.
-			var boxCenterX = ux;
-			if (baseAlign === "left") boxCenterX += (boxW / s.scale) / 2;
-			else if (baseAlign === "right") boxCenterX -= (boxW / s.scale) / 2;
-
-			var boxCenterY = uy;
-			if (baseValign === "top") boxCenterY += (boxH / s.scale) / 2;
-			else if (baseValign === "bottom") boxCenterY -= (boxH / s.scale) / 2;
-
-			// If textRot != shapeRot (e.g. horizontal label inside a direction=north shape),
-			// rotate boxCenter around cellCenter by (textRot - shapeRot) into the shape's rotated frame:
 			var deltaRot = textRot - shapeRot;
-			if (deltaRot !== 0)
+
+			// When the label is an unrotated internal label that fits within the shape bounds,
+			// use the full shape box (Width*0.5, Height*0.5, Width*1, Height*1) and express the
+			// label inset via LeftMargin/RightMargin/TopMargin/BottomMargin. This keeps the label
+			// attached to the shape itself in both Visio and draw.io VSDX import.
+			var useInternalFullBox = !isExternalLabel && deltaRot === 0 &&
+				scaledGeoW > 0 && scaledGeoH > 0 &&
+				boxW <= scaledGeoW * 1.05 && boxH <= scaledGeoH * 1.05;
+
+			if (useInternalFullBox)
 			{
-				var dRad = deltaRot * Math.PI / 180;
-				var dCos = Math.cos(dRad);
-				var dSin = Math.sin(dRad);
-				var dcx = boxCenterX - cellCenterX;
-				var dcy = boxCenterY - cellCenterY;
-				boxCenterX = cellCenterX + dcx * dCos - dcy * dSin;
-				boxCenterY = cellCenterY + dcx * dSin + dcy * dCos;
+				var relX = (ux - (geo.x - s.dx)) * s.scale;
+				var relY = (uy - (geo.y - s.dy)) * s.scale;
+
+				var leftM = 0, rightM = 0, topM = 0, bottomM = 0;
+				if (baseAlign === "left")
+				{
+					leftM = Math.max(0, relX);
+					rightM = Math.max(0, scaledGeoW - leftM - scaledW);
+				}
+				else if (baseAlign === "right")
+				{
+					rightM = Math.max(0, scaledGeoW - relX);
+					leftM = Math.max(0, scaledGeoW - rightM - scaledW);
+				}
+				else
+				{
+					leftM = rightM = Math.max(0, (scaledGeoW - scaledW) / 2);
+				}
+
+				if (baseValign === "top")
+				{
+					topM = Math.max(0, relY);
+					bottomM = Math.max(0, scaledGeoH - topM - scaledH);
+				}
+				else if (baseValign === "bottom")
+				{
+					bottomM = Math.max(0, scaledGeoH - relY);
+					topM = Math.max(0, scaledGeoH - bottomM - scaledH);
+				}
+				else
+				{
+					topM = bottomM = Math.max(0, (scaledGeoH - scaledH) / 2);
+				}
+
+				this.shape.appendChild(this.createCellElemScaled("LeftMargin", leftM));
+				this.shape.appendChild(this.createCellElemScaled("RightMargin", rightM));
+				this.shape.appendChild(this.createCellElemScaled("TopMargin", topM));
+				this.shape.appendChild(this.createCellElemScaled("BottomMargin", bottomM));
+
+				this.shape.appendChild(this.createCellElemScaled("TxtPinX", scaledGeoW * 0.5, "Width*0.5"));
+				this.shape.appendChild(this.createCellElemScaled("TxtPinY", scaledGeoH * 0.5, "Height*0.5"));
+				this.shape.appendChild(this.createCellElemScaled("TxtWidth", scaledGeoW, "Width*1"));
+				this.shape.appendChild(this.createCellElemScaled("TxtHeight", scaledGeoH, "Height*1"));
+				this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", scaledGeoW * 0.5, "TxtWidth*0.5"));
+				this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", scaledGeoH * 0.5, "TxtHeight*0.5"));
 			}
-
-			var localPinX = (boxCenterX - geo.x + s.dx) * s.scale;
-			var localPinY = (geo.height - boxCenterY + geo.y - s.dy) * s.scale;
-
-			this.shape.appendChild(this.createCellElemScaled("TxtPinX", localPinX));
-			this.shape.appendChild(this.createCellElemScaled("TxtPinY", localPinY));
-			this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW));
-			this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH));
-			this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", boxW / 2));
-			this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", boxH / 2));
-
-			var relTextAngle = textRot - shapeRot;
-			if (relTextAngle !== 0)
+			else
 			{
-				var normAngle = ((360 - relTextAngle) % 360 + 360) % 360;
-				this.shape.appendChild(this.createCellElem("TxtAngle", normAngle * Math.PI / 180));
+				// Displaced/external label or rotated/overflowing label:
+				// Zero out margins so the text box size is not shrunk by StyleSheet margins,
+				// and emit Width*/Height* formulas so Visio & draw.io recognize the displaced text box
+				// and let it grow to fit the text.
+				this.shape.appendChild(this.createCellElem("LeftMargin", "0"));
+				this.shape.appendChild(this.createCellElem("RightMargin", "0"));
+				this.shape.appendChild(this.createCellElem("TopMargin", "0"));
+				this.shape.appendChild(this.createCellElem("BottomMargin", "0"));
+
+				var boxCenterX = ux;
+				if (baseAlign === "left") boxCenterX += (boxW / s.scale) / 2;
+				else if (baseAlign === "right") boxCenterX -= (boxW / s.scale) / 2;
+
+				var boxCenterY = uy;
+				if (baseValign === "top") boxCenterY += (boxH / s.scale) / 2;
+				else if (baseValign === "bottom") boxCenterY -= (boxH / s.scale) / 2;
+
+				if (deltaRot !== 0)
+				{
+					var dRad = deltaRot * Math.PI / 180;
+					var dCos = Math.cos(dRad);
+					var dSin = Math.sin(dRad);
+					var dcx = boxCenterX - cellCenterX;
+					var dcy = boxCenterY - cellCenterY;
+					boxCenterX = cellCenterX + dcx * dCos - dcy * dSin;
+					boxCenterY = cellCenterY + dcy * dCos + dcx * dSin;
+				}
+
+				var localPinX = (boxCenterX - geo.x + s.dx) * s.scale;
+				var localPinY = (geo.height - boxCenterY + geo.y - s.dy) * s.scale;
+
+				var pinXF = (scaledGeoW > 1e-6) ? ("Width*" + (+(localPinX / scaledGeoW).toFixed(6))) : null;
+				var pinYF = (scaledGeoH > 1e-6) ? ("Height*" + (+(localPinY / scaledGeoH).toFixed(6))) : null;
+				var txtWF = wrapToWidth && scaledGeoW > 1e-6 ?
+					("Width*" + (+(boxW / scaledGeoW).toFixed(6))) :
+					"Width*0+MAX(TEXTWIDTH(TheText),5*Char.Size)";
+				var txtHF = "Height*0+TEXTHEIGHT(TheText,TxtWidth)";
+
+				this.shape.appendChild(this.createCellElemScaled("TxtPinX", localPinX, pinXF));
+				this.shape.appendChild(this.createCellElemScaled("TxtPinY", localPinY, pinYF));
+				this.shape.appendChild(this.createCellElemScaled("TxtWidth", boxW, txtWF));
+				this.shape.appendChild(this.createCellElemScaled("TxtHeight", boxH, txtHF));
+				this.shape.appendChild(this.createCellElemScaled("TxtLocPinX", boxW / 2, "TxtWidth*0.5"));
+				this.shape.appendChild(this.createCellElemScaled("TxtLocPinY", boxH / 2, "TxtHeight*0.5"));
+
+				if (deltaRot !== 0)
+				{
+					var normAngle = ((360 - deltaRot) % 360 + 360) % 360;
+					this.shape.appendChild(this.createCellElem("TxtAngle", normAngle * Math.PI / 180));
+				}
 			}
 		}
 
