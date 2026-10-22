@@ -670,6 +670,8 @@ function VsdxExport(editorUi)
 				// Allocate a distinct, collision-free ID for the inner group visual shape while keeping vsdxId for the outer Group Shape (so edges connecting to the group bind to the Group Shape ID)
 				var shape = createShape(vsdxId, geo, layerIndex, xmlDoc, parentHeight, isChild);
 				shape.setAttribute("Type", "Group");
+				shape._vsdxWidth = geo.width;
+				shape._vsdxHeight = geo.height;
 				if (shapeMap != null)
 				{
 					shapeMap[cell.id] = shape;
@@ -698,6 +700,7 @@ function VsdxExport(editorUi)
 				
 				if (subShape != null)
 				{
+					shape._bgSubShape = subShape;
 					gShapes.appendChild(subShape);
 				}
 				
@@ -738,6 +741,8 @@ function VsdxExport(editorUi)
 				}
 
 				var shape = createShape(vsdxId, shapeGeo, layerIndex, xmlDoc, parentHeight, isChild);
+				shape._vsdxWidth = shapeGeo.width;
+				shape._vsdxHeight = shapeGeo.height;
 				if (shapeMap != null)
 				{
 					shapeMap[cell.id] = shape;
@@ -784,6 +789,25 @@ function VsdxExport(editorUi)
 		}
 	};
 
+	var DEFAULT_RECT_CONSTRAINTS = [
+		{ x: 0,    y: 0,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.25, y: 0,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.5,  y: 0,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.75, y: 0,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 1,    y: 0,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0,    y: 0.25, perimeter: true, dx: 0, dy: 0 },
+		{ x: 0,    y: 0.5,  perimeter: true, dx: 0, dy: 0 },
+		{ x: 0,    y: 0.75, perimeter: true, dx: 0, dy: 0 },
+		{ x: 1,    y: 0.25, perimeter: true, dx: 0, dy: 0 },
+		{ x: 1,    y: 0.5,  perimeter: true, dx: 0, dy: 0 },
+		{ x: 1,    y: 0.75, perimeter: true, dx: 0, dy: 0 },
+		{ x: 0,    y: 1,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.25, y: 1,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.5,  y: 1,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 0.75, y: 1,    perimeter: true, dx: 0, dy: 0 },
+		{ x: 1,    y: 1,    perimeter: true, dx: 0, dy: 0 }
+	];
+
 	function buildConnectionsInfo(model, graph)
 	{
 		var connInfoMap = {};
@@ -811,6 +835,122 @@ function VsdxExport(editorUi)
 			return list.length;
 		};
 
+		var registerConstraintOnCell = function(targetCell, targetState, px, py, perimeter, dx, dy)
+		{
+			if (isNaN(px) || isNaN(py)) return null;
+			dx = isFinite(dx) ? dx : 0;
+			dy = isFinite(dy) ? dy : 0;
+
+			if (perimeter && targetState != null && graph.view != null && typeof graph.view.getPerimeterFunction === "function")
+			{
+				try
+				{
+					var perimFn = graph.view.getPerimeterFunction(targetState);
+					if (perimFn != null && (typeof mxPerimeter === "undefined" || perimFn !== mxPerimeter.RectanglePerimeter) &&
+						typeof mxRectangle !== "undefined" && typeof mxPoint !== "undefined")
+					{
+						var geo = targetCell.geometry;
+						var pw = Math.max(1, geo ? geo.width : 100) * 1000;
+						var ph = Math.max(1, geo ? geo.height : 100) * 1000;
+						var pRect = new mxRectangle(0, 0, pw, ph);
+						var nextPt = new mxPoint(px * pw + dx * 1000, py * ph + dy * 1000);
+						var projPt = perimFn(pRect, targetState, nextPt, false);
+						if (projPt != null && isFinite(projPt.x) && isFinite(projPt.y))
+						{
+							px = projPt.x / pw;
+							py = projPt.y / ph;
+							dx = 0;
+							dy = 0;
+						}
+					}
+				}
+				catch (e)
+				{
+					// Fall back to unprojected (px, py)
+				}
+			}
+
+			return registerConnPoint(targetCell, px, 1 - py, dx, -dy);
+		};
+
+		// First pass: populate every connectable vertex with all of its shape connection points
+		for (var vId in model.cells)
+		{
+			var vCell = model.cells[vId];
+			if (vCell != null && vCell.vertex && vCell.geometry != null)
+			{
+				var vState = graph.view.getState(vCell, true);
+				if (vState != null && vState.style != null && vState.style["connectable"] == "0")
+				{
+					continue;
+				}
+				if (typeof graph.isCellConnectable === "function" && !graph.isCellConnectable(vCell))
+				{
+					continue;
+				}
+
+				var shapeConstraints = null;
+				if (vState != null && vState.shape != null)
+				{
+					var sw = vCell.geometry.width || 100;
+					var sh = vCell.geometry.height || 100;
+					if (typeof vState.shape.getConstraints === "function")
+					{
+						shapeConstraints = vState.shape.getConstraints(vState.style, sw, sh);
+					}
+					if (shapeConstraints == null && vState.shape.stencil != null && vState.shape.stencil.constraints != null)
+					{
+						shapeConstraints = vState.shape.stencil.constraints;
+					}
+					if (shapeConstraints == null && vState.shape.constraints != null)
+					{
+						shapeConstraints = vState.shape.constraints;
+					}
+				}
+
+				// If the shape has no intrinsic constraints (or fewer than 4, e.g. stencils without <connections>),
+				// include the standard 16 rectangle perimeter connection points
+				if (shapeConstraints == null || shapeConstraints.length < 4)
+				{
+					for (var dIdx = 0; dIdx < DEFAULT_RECT_CONSTRAINTS.length; dIdx++)
+					{
+						var dc = DEFAULT_RECT_CONSTRAINTS[dIdx];
+						registerConstraintOnCell(vCell, vState, dc.x, dc.y, dc.perimeter, dc.dx, dc.dy);
+					}
+				}
+
+				if (shapeConstraints != null)
+				{
+					for (var sIdx = 0; sIdx < shapeConstraints.length; sIdx++)
+					{
+						var sc = shapeConstraints[sIdx];
+						if (sc != null && sc.point != null)
+						{
+							registerConstraintOnCell(vCell, vState, parseFloat(sc.point.x), parseFloat(sc.point.y), sc.perimeter !== false, parseFloat(sc.dx || 0), parseFloat(sc.dy || 0));
+						}
+					}
+				}
+
+				// Also include any custom style points (e.g. points=[[...]]) via graph.getAllConnectionConstraints
+				if (typeof graph.getAllConnectionConstraints === "function" && vState != null)
+				{
+					var customConstraints = graph.getAllConnectionConstraints(vState, true);
+					if (customConstraints != null)
+					{
+						for (var cIdx = 0; cIdx < customConstraints.length; cIdx++)
+						{
+							var cc = customConstraints[cIdx];
+							if (cc != null && cc.point != null)
+							{
+								registerConstraintOnCell(vCell, vState, parseFloat(cc.point.x), parseFloat(cc.point.y), cc.perimeter !== false, parseFloat(cc.dx || 0), parseFloat(cc.dy || 0));
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Second pass: bind edges with explicit exitX/exitY or entryX/entryY to their corresponding Connection row
 		for (var id in model.cells)
 		{
 			var cell = model.cells[id];
@@ -826,14 +966,16 @@ function VsdxExport(editorUi)
 					var ey = parseFloat(state.style[mxConstants.STYLE_EXIT_Y]);
 					var edx = parseFloat(state.style[mxConstants.STYLE_EXIT_DX] || 0);
 					var edy = parseFloat(state.style[mxConstants.STYLE_EXIT_DY] || 0);
-					if (!isNaN(ex) && !isNaN(ey))
+					var ePerim = state.style[mxConstants.STYLE_EXIT_PERIMETER] != "0";
+					var srcState = graph.view.getState(cell.source, true);
+					var srcIdx = registerConstraintOnCell(cell.source, srcState, ex, ey, ePerim, edx, edy);
+					if (srcIdx != null)
 					{
-						var cIdx = registerConnPoint(cell.source, ex, 1 - ey, edx, -edy);
 						var srcVsdxId = getCellVsdxId(cell.source.id);
-						info.fromPart = cIdx;
-						info.toCellBegin = "Connections.X" + cIdx;
-						info.beginXF = "PAR(PNT(Sheet." + srcVsdxId + "!Connections.X" + cIdx + ",Sheet." + srcVsdxId + "!Connections.Y" + cIdx + "))";
-						info.beginYF = "PAR(PNT(Sheet." + srcVsdxId + "!Connections.X" + cIdx + ",Sheet." + srcVsdxId + "!Connections.Y" + cIdx + "))";
+						info.fromPart = srcIdx;
+						info.toCellBegin = "Connections.X" + srcIdx;
+						info.beginXF = "PAR(PNT(Sheet." + srcVsdxId + "!Connections.X" + srcIdx + ",Sheet." + srcVsdxId + "!Connections.Y" + srcIdx + "))";
+						info.beginYF = "PAR(PNT(Sheet." + srcVsdxId + "!Connections.X" + srcIdx + ",Sheet." + srcVsdxId + "!Connections.Y" + srcIdx + "))";
 					}
 				}
 
@@ -843,14 +985,16 @@ function VsdxExport(editorUi)
 					var ny = parseFloat(state.style[mxConstants.STYLE_ENTRY_Y]);
 					var ndx = parseFloat(state.style[mxConstants.STYLE_ENTRY_DX] || 0);
 					var ndy = parseFloat(state.style[mxConstants.STYLE_ENTRY_DY] || 0);
-					if (!isNaN(nx) && !isNaN(ny))
+					var nPerim = state.style[mxConstants.STYLE_ENTRY_PERIMETER] != "0";
+					var tgtState = graph.view.getState(cell.target, true);
+					var tgtIdx = registerConstraintOnCell(cell.target, tgtState, nx, ny, nPerim, ndx, ndy);
+					if (tgtIdx != null)
 					{
-						var cIdx = registerConnPoint(cell.target, nx, 1 - ny, ndx, -ndy);
 						var tgtVsdxId = getCellVsdxId(cell.target.id);
-						info.toPart = cIdx;
-						info.toCellEnd = "Connections.X" + cIdx;
-						info.endXF = "PAR(PNT(Sheet." + tgtVsdxId + "!Connections.X" + cIdx + ",Sheet." + tgtVsdxId + "!Connections.Y" + cIdx + "))";
-						info.endYF = "PAR(PNT(Sheet." + tgtVsdxId + "!Connections.X" + cIdx + ",Sheet." + tgtVsdxId + "!Connections.Y" + cIdx + "))";
+						info.toPart = tgtIdx;
+						info.toCellEnd = "Connections.X" + tgtIdx;
+						info.endXF = "PAR(PNT(Sheet." + tgtVsdxId + "!Connections.X" + tgtIdx + ",Sheet." + tgtVsdxId + "!Connections.Y" + tgtIdx + "))";
+						info.endYF = "PAR(PNT(Sheet." + tgtVsdxId + "!Connections.X" + tgtIdx + ",Sheet." + tgtVsdxId + "!Connections.Y" + tgtIdx + "))";
 					}
 				}
 
@@ -864,6 +1008,34 @@ function VsdxExport(editorUi)
 		};
 	}
 
+	function buildConnectionSectionElement(conns, gw, gh, xmlDoc)
+	{
+		var connSec = createElt(xmlDoc, that.XMLNS, "Section");
+		connSec.setAttribute("N", "Connection");
+
+		for (var i = 0; i < conns.length; i++)
+		{
+			var c = conns[i];
+			var row = createElt(xmlDoc, that.XMLNS, "Row");
+			row.setAttribute("IX", i + "");
+
+			var xVal = gw * c.xRatio + c.dx;
+			var yVal = gh * c.yRatio + c.dy;
+			var xF = "Width*" + (+c.xRatio.toFixed(6)) + (c.dx ? ("+" + (c.dx / that.CONVERSION_FACTOR)) : "");
+			var yF = "Height*" + (+c.yRatio.toFixed(6)) + (c.dy ? ("+" + (c.dy / that.CONVERSION_FACTOR)) : "");
+
+			row.appendChild(createCellElemScaled("X", xVal, xmlDoc, xF));
+			row.appendChild(createCellElemScaled("Y", yVal, xmlDoc, yF));
+			row.appendChild(createCellElem("DirX", "0", xmlDoc));
+			row.appendChild(createCellElem("DirY", "0", xmlDoc));
+			row.appendChild(createCellElem("Type", "0", xmlDoc));
+			row.appendChild(createCellElem("AutoGen", "0", xmlDoc));
+			connSec.appendChild(row);
+		}
+
+		return connSec;
+	}
+
 	function appendConnectionSections(vertexConns, shapeMap, model, xmlDoc)
 	{
 		for (var cellId in vertexConns)
@@ -875,31 +1047,9 @@ function VsdxExport(editorUi)
 			var conns = vertexConns[cellId];
 			if (!conns || conns.length === 0) continue;
 
-			var connSec = createElt(xmlDoc, that.XMLNS, "Section");
-			connSec.setAttribute("N", "Connection");
-
-			var gw = cell.geometry.width;
-			var gh = cell.geometry.height;
-
-			for (var i = 0; i < conns.length; i++)
-			{
-				var c = conns[i];
-				var row = createElt(xmlDoc, that.XMLNS, "Row");
-				row.setAttribute("IX", i + "");
-
-				var xVal = gw * c.xRatio + c.dx;
-				var yVal = gh * c.yRatio + c.dy;
-				var xF = "Width*" + (+c.xRatio.toFixed(6)) + (c.dx ? ("+" + (c.dx / that.CONVERSION_FACTOR)) : "");
-				var yF = "Height*" + (+c.yRatio.toFixed(6)) + (c.dy ? ("+" + (c.dy / that.CONVERSION_FACTOR)) : "");
-
-				row.appendChild(createCellElemScaled("X", xVal, xmlDoc, xF));
-				row.appendChild(createCellElemScaled("Y", yVal, xmlDoc, yF));
-				row.appendChild(createCellElem("DirX", "0", xmlDoc));
-				row.appendChild(createCellElem("DirY", "0", xmlDoc));
-				row.appendChild(createCellElem("Type", "0", xmlDoc));
-				row.appendChild(createCellElem("AutoGen", "0", xmlDoc));
-				connSec.appendChild(row);
-			}
+			var gw = shape._vsdxWidth != null ? shape._vsdxWidth : cell.geometry.width;
+			var gh = shape._vsdxHeight != null ? shape._vsdxHeight : cell.geometry.height;
+			var connSec = buildConnectionSectionElement(conns, gw, gh, xmlDoc);
 
 			// Insert Connection section before Shapes (if Group) or at end of Shape
 			var childShapes = null;
@@ -918,6 +1068,15 @@ function VsdxExport(editorUi)
 			else
 			{
 				shape.appendChild(connSec);
+			}
+
+			// If this shape is a Group with a visual background child shape, also add the Connection section
+			// to the background child so Visio displays the connection points when hovering over the group's body
+			if (shape._bgSubShape != null)
+			{
+				var bgW = shape._bgSubShape._vsdxWidth != null ? shape._bgSubShape._vsdxWidth : gw;
+				var bgH = shape._bgSubShape._vsdxHeight != null ? shape._bgSubShape._vsdxHeight : gh;
+				shape._bgSubShape.appendChild(buildConnectionSectionElement(conns, bgW, bgH, xmlDoc));
 			}
 		}
 	}

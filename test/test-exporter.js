@@ -739,11 +739,14 @@ console.log('Running VsdxExport & mxVsdxCanvas2D test suite...');
 	assert.strictEqual(v1Cells.TextBkgnd.V, '#ffff00', 'TextBkgnd value should be #ffff00');
 	assert.strictEqual(v1Cells.TextBkgnd.F, 'RGB(255,255,0)', 'TextBkgnd must have RGB(255,255,0) formula');
 	const v1ConnSec = v1Shape.children.find(c => c.nodeName === 'Section' && c.getAttribute('N') === 'Connection');
-	assert(v1ConnSec, 'v1 should have a Connection section for exitX/exitY');
+	assert(v1ConnSec, 'v1 should have a Connection section');
+	assert.strictEqual(v1ConnSec.children.length, 16, 'v1 should have all 16 standard rectangle perimeter connection points');
 
 	// Verify group shape and internal edge coordinates
 	const grpShape = topShapes[1];
 	assert.strictEqual(grpShape.getAttribute('Type'), 'Group');
+	const grpConnSec = grpShape.children.find(c => c.nodeName === 'Section' && c.getAttribute('N') === 'Connection');
+	assert(grpConnSec && grpConnSec.children.length === 16, 'Group shape should also have all 16 perimeter connection points');
 	const grpChildShapes = grpShape.children.find(c => c.nodeName === 'Shapes').children;
 	assert.strictEqual(grpChildShapes.length, 4, 'Group should have background shape + 2 child vertices + 1 internal edge');
 	const internalEdgeShape = grpChildShapes[3];
@@ -755,22 +758,23 @@ console.log('Running VsdxExport & mxVsdxCanvas2D test suite...');
 	assert(Math.abs(parseFloat(internalEdgeCells.BeginY.V) - (100 / CF)) < 1e-4, 'Internal group edge BeginY must be group-relative (100/CF)');
 
 	// Verify top-level edge e1: diamondThin arrow (22), blockThin arrow (2), rounded=1 (10/CF), connection formulas
+	// In DEFAULT_RECT_CONSTRAINTS, (1, 0.5) is index 9 (1-based Connections.X10) and (0, 0.5) is index 6 (1-based Connections.X7)
 	const e1Shape = topShapes[2];
 	const e1Cells = getCellMap(e1Shape);
 	assert.strictEqual(e1Cells.BeginArrow.V, '22', 'unfilled diamondThin must map to Visio arrow 22');
 	assert.strictEqual(e1Cells.EndArrow.V, '2', 'filled blockThin must map to Visio arrow 2');
 	assert(Math.abs(parseFloat(e1Cells.Rounding.V) - (10 / CF)) < 1e-4, 'Edge with rounded=1 should have Rounding = 10/CF');
-	assert(e1Cells.BeginX.F.includes('Connections.X1'), 'Edge BeginX formula should bind to source Connections.X1');
-	assert(e1Cells.EndX.F.includes('Connections.X1'), 'Edge EndX formula should bind to target group Connections.X1');
+	assert(e1Cells.BeginX.F.includes('Connections.X10'), 'Edge BeginX formula should bind to source (1,0.5) at Connections.X10');
+	assert(e1Cells.EndX.F.includes('Connections.X7'), 'Edge EndX formula should bind to target group (0,0.5) at Connections.X7');
 
-	// Verify Connects section binds e1 to v1 and grp1 (with ToCell="Connections.X1")
+	// Verify Connects section binds e1 to v1 (Connections.X10) and grp1 (Connections.X7)
 	const connects = connectsEl.children;
 	assert.strictEqual(connects.length, 4, 'Should have 4 Connect entries (2 for e1, 2 for ge1)');
 	const e1Connects = connects.filter(c => c.getAttribute('FromSheet') === e1Shape.getAttribute('ID'));
 	assert.strictEqual(e1Connects[0].getAttribute('ToSheet'), v1Shape.getAttribute('ID'));
-	assert.strictEqual(e1Connects[0].getAttribute('ToCell'), 'Connections.X1');
+	assert.strictEqual(e1Connects[0].getAttribute('ToCell'), 'Connections.X10');
 	assert.strictEqual(e1Connects[1].getAttribute('ToSheet'), grpShape.getAttribute('ID'), 'Edge to group must connect to outer Group ID');
-	assert.strictEqual(e1Connects[1].getAttribute('ToCell'), 'Connections.X1');
+	assert.strictEqual(e1Connects[1].getAttribute('ToCell'), 'Connections.X7');
 
 	// 3B: Test multi-page export with duplicate page names
 	const okMulti = exporter.exportCurrentDiagrams(false);
