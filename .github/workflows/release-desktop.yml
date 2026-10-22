@@ -1,0 +1,239 @@
+name: Build & Release draw.io Desktop with Visio (VSDX) Export
+
+on:
+  # Check daily at 06:00 UTC for new upstream jgraph/drawio-desktop releases
+  schedule:
+    - cron: '0 6 * * *'
+
+  # Automatically rebuild and update the release when exporter code changes on master
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'test/**'
+      - '.github/workflows/release-desktop.yml'
+
+  # Allow manual triggering for any draw.io version
+  workflow_dispatch:
+    inputs:
+      drawio_version:
+        description: 'Upstream jgraph/drawio-desktop tag (e.g. v32.5.5, or "latest")'
+        required: false
+        default: 'latest'
+        type: string
+      force_rebuild:
+        description: 'Rebuild and overwrite release assets even if tag already exists'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Test Exporter & Check Upstream draw.io Version
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      drawio_tag: ${{ steps.check.outputs.drawio_tag }}
+      drawio_version: ${{ steps.check.outputs.drawio_version }}
+    steps:
+      - name: Checkout draw2visio
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build plugin and run test suite
+        run: |
+          node scripts/build-plugin.js
+          node test/test-exporter.js
+
+      - name: Check latest jgraph/drawio-desktop release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.drawio_version }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "latest" ]; then
+            TAG="$INPUT_VERSION"
+          else
+            TAG=$(gh api repos/jgraph/drawio-desktop/releases/latest --jq '.tag_name')
+          fi
+
+          VERSION="${TAG#v}"
+          echo "Upstream draw.io Desktop tag: $TAG (version: $VERSION)"
+          echo "drawio_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "drawio_version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Check if our repo already has a release for this tag
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            EXISTS="true"
+          else
+            EXISTS="false"
+          fi
+
+          if [ "$EXISTS" = "false" ]; then
+            echo "Release $TAG does not exist yet in ${{ github.repository }} -> building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ] || [ "$FORCE_REBUILD" = "true" ]; then
+            echo "Release $TAG exists, but triggered by $EVENT_NAME / force_rebuild -> rebuilding."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $TAG already exists in ${{ github.repository }} -> skipping scheduled build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-desktop:
+    name: Build draw.io Desktop (${{ matrix.platform }})
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
+          - platform: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      DRAWIO_UNSIGNED: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout draw2visio
+        uses: actions/checkout@v4
+        with:
+          path: draw2visio
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build & verify VSDX exporter plugin
+        working-directory: draw2visio
+        run: |
+          node scripts/build-plugin.js
+          node test/test-exporter.js
+
+      - name: Clone jgraph/drawio-desktop (${{ needs.check-version.outputs.drawio_tag }})
+        run: |
+          git clone --branch "${{ needs.check-version.outputs.drawio_tag }}" \
+            --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/jgraph/drawio-desktop.git drawio-desktop
+
+      - name: Inject VSDX exporter into draw.io webapp before packaging
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const pluginCode = fs.readFileSync("draw2visio/dist/visio-export-plugin.js", "utf8");
+            const markerStart = "/* === DRAW2VISIO_PLUGIN_START === */";
+            const markerEnd = "/* === DRAW2VISIO_PLUGIN_END === */";
+            const postConfigPath = path.join("drawio-desktop", "drawio", "src", "main", "webapp", "js", "PostConfig.js");
+            const origPostConfig = fs.existsSync(postConfigPath) ? fs.readFileSync(postConfigPath, "utf8") : "";
+            const patchedPostConfig = origPostConfig.trimEnd() + "\n\n" + markerStart + "\n" + pluginCode + "\n" + markerEnd + "\n";
+            fs.writeFileSync(postConfigPath, patchedPostConfig, "utf8");
+
+            const vsdxPluginDir = path.join("drawio-desktop", "drawio", "src", "main", "webapp", "plugins");
+            fs.mkdirSync(vsdxPluginDir, { recursive: true });
+            fs.writeFileSync(path.join(vsdxPluginDir, "vsdx.js"), pluginCode, "utf8");
+            console.log("Injected draw2visio exporter into PostConfig.js and plugins/vsdx.js");
+          '
+
+      - name: Install Linux packaging tools
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y icnsutils graphicsmagick xz-utils rpm
+          sed -ie 's/"asar": true,/"asar": true,\n"productName": "drawio",/' drawio-desktop/electron-builder-linux-mac.json
+
+      - name: Build draw.io Desktop packages
+        working-directory: drawio-desktop
+        run: |
+          npm ci
+          # Disable auto-update so the app does not overwrite itself with an unpatched release
+          npm run sync -- disableUpdate
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            npx electron-builder --config electron-builder-win.json --publish never
+          else
+            npx electron-builder --config electron-builder-linux-mac.json --publish never
+          fi
+
+      - name: Collect standalone app.asar and plugin bundle (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cp draw2visio/dist/visio-export-plugin.js drawio-desktop/dist/visio-export-plugin.js
+          ASAR_FILE=$(find drawio-desktop/dist -name "app.asar" | head -n 1)
+          if [ -n "$ASAR_FILE" ]; then
+            cp "$ASAR_FILE" drawio-desktop/dist/app.asar
+          fi
+
+      - name: Upload built artifacts (${{ matrix.platform }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: drawio-desktop-${{ matrix.platform }}
+          path: |
+            drawio-desktop/dist/*.dmg
+            drawio-desktop/dist/*.zip
+            drawio-desktop/dist/*.exe
+            drawio-desktop/dist/*.msi
+            drawio-desktop/dist/*.AppImage
+            drawio-desktop/dist/*.deb
+            drawio-desktop/dist/*.rpm
+            drawio-desktop/dist/app.asar
+            drawio-desktop/dist/visio-export-plugin.js
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [check-version, build-desktop]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          ls -lh
+
+      - name: Create or update GitHub Release (${{ needs.check-version.outputs.drawio_tag }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check-version.outputs.drawio_tag }}
+          VERSION: ${{ needs.check-version.outputs.drawio_version }}
+        working-directory: release-assets
+        run: |
+          NOTES="Automated build of **draw.io Desktop ${TAG}** with the restored and fixed Microsoft Visio (\`.vsdx\`) exporter from \`draw2visio\` pre-installed.
+
+          ### Included Assets
+          - **Linux**: \`.deb\`, \`.rpm\`, \`.AppImage\` (x64 & arm64)
+          - **Windows**: \`windows-installer.exe\`, \`.msi\` (x64)
+          - **macOS**: \`.dmg\`, \`.zip\` (x64, arm64, universal)
+          - **Drop-in ASAR**: \`app.asar\` (replace \`/opt/drawio/resources/app.asar\` or equivalent on an existing installation)
+          - **Web/Plugin Bundle**: \`visio-export-plugin.js\`"
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" * --repo "${{ github.repository }}" --clobber
+            gh release edit "$TAG" --repo "${{ github.repository }}" --title "draw.io Desktop ${TAG} (with Visio VSDX Export)" --notes "$NOTES"
+          else
+            gh release create "$TAG" * --repo "${{ github.repository }}" --title "draw.io Desktop ${TAG} (with Visio VSDX Export)" --notes "$NOTES"
+          fi
