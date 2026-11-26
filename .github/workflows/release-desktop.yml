@@ -43,10 +43,10 @@ jobs:
       drawio_version: ${{ steps.check.outputs.drawio_version }}
     steps:
       - name: Checkout draw2visio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -115,12 +115,12 @@ jobs:
         shell: bash
     steps:
       - name: Checkout draw2visio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: draw2visio
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -161,6 +161,17 @@ jobs:
           sudo apt-get update && sudo apt-get install -y icnsutils graphicsmagick xz-utils rpm
           sed -ie 's/"asar": true,/"asar": true,\n"productName": "drawio",/' drawio-desktop/electron-builder-linux-mac.json
 
+      - name: Provide Windows packaging config
+        if: matrix.platform == 'windows'
+        run: |
+          # Upstream removed electron-builder-win.json (and its signing/MSI hooks)
+          # from the public repo in v32.7.4, so ship our own unsigned config.
+          if [ ! -f drawio-desktop/electron-builder-win.json ]; then
+            cp draw2visio/build/windows/electron-builder-win.json drawio-desktop/
+            cp draw2visio/build/windows/msi-project-created.mjs drawio-desktop/build/
+            echo "Using draw2visio's vendored electron-builder-win.json"
+          fi
+
       - name: Build draw.io Desktop packages
         working-directory: drawio-desktop
         run: |
@@ -183,7 +194,7 @@ jobs:
           fi
 
       - name: Upload built artifacts (${{ matrix.platform }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drawio-desktop-${{ matrix.platform }}
           path: |
@@ -204,7 +215,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all built artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
