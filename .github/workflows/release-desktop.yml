@@ -253,7 +253,7 @@ jobs:
 
           ### Included Assets
           - **Linux**: \`.deb\`, \`.rpm\`, \`.AppImage\` (x64 & arm64)
-          - **Windows**: \`windows-installer.exe\`, \`.msi\` (x64)
+          - **Windows**: \`windows-installer.exe\`, \`.msi\`, portable \`windows-no-installer.exe\` and \`windows.zip\` (x64)
           - **macOS**: \`.dmg\`, \`.zip\` (x64, arm64, universal)
           - **Drop-in ASAR**: \`app.asar\` (replace \`/opt/drawio/resources/app.asar\` or equivalent on an existing installation)
           - **Web/Plugin Bundle**: \`visio-export-plugin.js\`"
