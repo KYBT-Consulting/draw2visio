@@ -14,6 +14,7 @@ on:
       - 'src/**'
       - 'scripts/**'
       - 'test/**'
+      - 'build/**'
       - '.github/workflows/release-desktop.yml'
 
   # Allow manual triggering for any draw.io version
@@ -32,6 +33,12 @@ on:
 
 permissions:
   contents: write
+
+# Never let two runs build/publish the same release at once (they race on
+# release creation and asset uploads); queue them instead.
+concurrency:
+  group: release-desktop
+  cancel-in-progress: false
 
 jobs:
   check-version:
