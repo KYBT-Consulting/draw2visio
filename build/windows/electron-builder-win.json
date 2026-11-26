@@ -48,8 +48,7 @@
           "x64"
         ]
       }
-    ],
-    "artifactName": "${productName}-${version}-windows.${ext}"
+    ]
   },
   "nsis": {
     "artifactName": "${productName}-${version}-windows-installer.${ext}",

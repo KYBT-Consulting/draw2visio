@@ -203,6 +203,11 @@ jobs:
           npm run sync -- disableUpdate
           if [ "${{ matrix.platform }}" = "windows" ]; then
             npx electron-builder --config electron-builder-win.json --publish never
+            # electron-builder ignores win.artifactName for the zip target; give the
+            # portable zip an unambiguous name so it can't be confused with the macOS zips
+            for z in dist/*.zip; do
+              case "$z" in *-windows.zip) ;; *) mv "$z" "${z%.zip}-windows.zip" ;; esac
+            done
           else
             npx electron-builder --config electron-builder-linux-mac.json --publish never
           fi
