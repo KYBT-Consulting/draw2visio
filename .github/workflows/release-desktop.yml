@@ -172,6 +172,22 @@ jobs:
             echo "Using draw2visio's vendored electron-builder-win.json"
           fi
 
+      - name: Provide macOS packaging config
+        if: matrix.platform == 'macos'
+        run: |
+          # Upstream also dropped the "mac" section (targets, file-type
+          # declarations, signing) in v32.7.4, which left electron-builder
+          # building only the runner's own arch (arm64). Merge in our unsigned one.
+          node -e '
+            const fs = require("fs");
+            const cfgPath = "drawio-desktop/electron-builder-linux-mac.json";
+            const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+            if (cfg.mac) { console.log("Upstream provides a mac section, keeping it"); process.exit(0); }
+            Object.assign(cfg, JSON.parse(fs.readFileSync("draw2visio/build/macos/mac-config.json", "utf8")));
+            fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+            console.log("Merged draw2visio mac config (x64/arm64 zip, x64/arm64/universal dmg)");
+          '
+
       - name: Build draw.io Desktop packages
         working-directory: drawio-desktop
         run: |
@@ -242,9 +258,26 @@ jobs:
           - **Drop-in ASAR**: \`app.asar\` (replace \`/opt/drawio/resources/app.asar\` or equivalent on an existing installation)
           - **Web/Plugin Bundle**: \`visio-export-plugin.js\`"
 
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$TAG" * --repo "${{ github.repository }}" --clobber
-            gh release edit "$TAG" --repo "${{ github.repository }}" --title "draw.io Desktop ${TAG} (with Visio VSDX Export)" --notes "$NOTES"
+          REPO="${{ github.repository }}"
+          TITLE="draw.io Desktop ${TAG} (with Visio VSDX Export)"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
           else
-            gh release create "$TAG" * --repo "${{ github.repository }}" --title "draw.io Desktop ${TAG} (with Visio VSDX Export)" --notes "$NOTES"
+            # Create without assets first: uploading straight into a just-created
+            # release can 404 on uploads.github.com, which rolls the whole release back.
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
           fi
+
+          for f in *; do
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$f" --repo "$REPO" --clobber; then
+                break
+              fi
+              if [ "$attempt" = 5 ]; then
+                echo "::error::Failed to upload $f after 5 attempts"
+                exit 1
+              fi
+              echo "Upload of $f failed (attempt $attempt), retrying in $((attempt * 10))s..."
+              sleep $((attempt * 10))
+            done
+          done
